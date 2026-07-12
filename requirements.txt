@@ -8,4 +8,5 @@ openai>=1.0.0
 python-telegram-bot>=21.0
 telethon>=1.36.0
 pypdf>=4.0.0
+yfinance>=0.2.40
 pytest==8.3.4

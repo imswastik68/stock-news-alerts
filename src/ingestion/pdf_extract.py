@@ -32,8 +32,7 @@ def _headers_for(url: str) -> dict:
     return {"User-Agent": _USER_AGENT, "Referer": origin}
 
 _MAX_PDF_BYTES = 15 * 1024 * 1024  # skip anything larger — avoids slow downloads
-_MAX_PAGES = 3                     # first pages carry the material content
-_MAX_CHARS = 2000                  # cap fed to the LLM (~500 tokens; Groq TPM budget)
+_DEFAULT_MAX_CHARS = 2000          # ~500 tokens; caller passes more for HIGH-impact
 _TIMEOUT = 20
 
 
@@ -54,9 +53,12 @@ def _download(url: str, session: requests.Session | None) -> bytes | None:
         return None
 
 
-def extract_pdf_text(url: str, session: requests.Session | None = None) -> str | None:
-    """Return up to _MAX_CHARS of cleaned text from the first pages of the PDF at
-    `url`, or None if it can't be downloaded/parsed or has no text layer."""
+def extract_pdf_text(
+    url: str, session: requests.Session | None = None, max_chars: int = _DEFAULT_MAX_CHARS
+) -> str | None:
+    """Return up to `max_chars` of cleaned text from the first pages of the PDF at
+    `url`, or None if it can't be downloaded/parsed or has no text layer. HIGH-
+    impact filings pass a larger max_chars so results tables aren't truncated."""
     if not url or not url.lower().startswith("http"):
         return None
 
@@ -64,12 +66,14 @@ def extract_pdf_text(url: str, session: requests.Session | None = None) -> str |
     if not data:
         return None
 
+    # Roughly one page per ~1500 chars of extracted text; read a couple extra.
+    max_pages = max(3, max_chars // 1500 + 2)
     try:
         from pypdf import PdfReader
 
         reader = PdfReader(io.BytesIO(data))
         parts: list[str] = []
-        for page in reader.pages[:_MAX_PAGES]:
+        for page in reader.pages[:max_pages]:
             parts.append(page.extract_text() or "")
         text = " ".join(" ".join(parts).split())
     except Exception as exc:
@@ -78,4 +82,4 @@ def extract_pdf_text(url: str, session: requests.Session | None = None) -> str |
 
     if len(text) < 30:  # scanned/image-only PDF — no usable text layer
         return None
-    return text[:_MAX_CHARS]
+    return text[:max_chars]

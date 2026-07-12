@@ -43,3 +43,9 @@ class Article(Base):
     reasoning: Mapped[str] = mapped_column(String)
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Outcome tracking (filled in later by src/scoring/outcomes.py for alerted
+    # rows): forward % return of the stock over N trading days from the alert.
+    # NULL until that horizon has matured. Feeds the calibrated confidence model.
+    ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ret_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    ret_5d: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -1,21 +1,26 @@
 """
 Confidence scoring for classified articles.
 
-IMPORTANT: the static table below is a starting heuristic, not a statistically
-validated model. It has not been backtested against actual price outcomes —
-treat alert confidence as a filter for your own research, not a signal to act
-on directly. See confidence_table.yaml for the base rates and rationale.
+Two implementations behind the ConfidenceProvider interface:
 
-ConfidenceProvider is an interface so a future backtested implementation (e.g.
-one that learns event_type -> forward-return-hit-rate from the articles table
-once enough history has accumulated) can be swapped in without touching the
-pipeline. That backtester is intentionally NOT built yet — this only leaves the
-extension point clean.
+  StaticTableConfidenceProvider     — the hand-tuned prior from confidence_table.yaml
+                                       (subjective, not backtested).
+  BacktestedConfidenceProvider      — blends that prior with the EMPIRICAL hit-rate
+                                       measured from tracked alert outcomes
+                                       (src/scoring/outcomes.py), via Bayesian
+                                       shrinkage. Early on it's ~the prior; as real
+                                       outcomes accumulate it becomes calibrated —
+                                       an "82%" starts to actually mean 82%.
+
+The pipeline uses the backtested provider; with no outcome history yet it falls
+back cleanly to the static prior.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+
+from sqlalchemy.orm import Session
 
 from src.classification.schema import ClassificationResult
 from src.config import get_settings
@@ -77,3 +82,31 @@ class StaticTableConfidenceProvider(ConfidenceProvider):
         adjustment = self._magnitude_adjustment(result)
         adjustment += self._materiality_adjustment(result)
         return round(_clamp(base + adjustment, _MIN_CONFIDENCE, _MAX_CONFIDENCE), 4)
+
+
+# Pseudo-count for Bayesian shrinkage: with K prior "observations", an event type
+# needs a few dozen real outcomes before the empirical rate meaningfully overrides
+# the prior. Prevents a lucky 3/3 start from claiming 100% confidence.
+_SHRINKAGE_K = 15
+
+
+class BacktestedConfidenceProvider(StaticTableConfidenceProvider):
+    """Static prior shrunk toward the empirical hit-rate measured from tracked
+    outcomes. base_rate(e) = (n·hit_rate + K·prior) / (n + K)."""
+
+    def __init__(self, session: Session, base_rates: dict[str, float] | None = None):
+        super().__init__(base_rates)
+        from src.storage.db import get_hit_rate_stats
+
+        try:
+            self._stats = get_hit_rate_stats(session)
+        except Exception:
+            self._stats = {}
+
+    def _base_rate(self, event_type: str) -> float:
+        prior = super()._base_rate(event_type)
+        s = self._stats.get(event_type)
+        if not s or s["n"] <= 0:
+            return prior
+        hit_rate = s["hits"] / s["n"]
+        return (s["n"] * hit_rate + _SHRINKAGE_K * prior) / (s["n"] + _SHRINKAGE_K)

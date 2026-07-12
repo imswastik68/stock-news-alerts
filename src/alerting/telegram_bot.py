@@ -30,7 +30,24 @@ def _event_type_label(event_type: str) -> str:
     return event_type.replace("_", " ").title()
 
 
-def _format_alert(article: Article) -> str:
+def _format_price_line(quote: dict | None) -> str | None:
+    """Price + %move + liquidity context, so you can tell a real mover / liquid
+    name from an illiquid micro-cap. Skipped if the quote couldn't be fetched."""
+    if not quote or quote.get("price") is None:
+        return None
+    price = quote["price"]
+    pct = quote.get("pct_change")
+    vol = quote.get("avg_volume")
+    parts = [f"₹{price:,.2f}"]
+    if pct is not None:
+        arrow = "▲" if pct >= 0 else "▼"
+        parts.append(f"{arrow}{abs(pct):.1f}%")
+    if vol:
+        parts.append(f"vol {vol/1e6:.1f}M" if vol >= 1e6 else f"vol {vol/1e3:.0f}K")
+    return "💹 " + " | ".join(parts)
+
+
+def _format_alert(article: Article, quote: dict | None = None) -> str:
     emoji = _DIRECTION_EMOJI.get(article.direction, "⚪")
     event_label = _event_type_label(article.event_type)
     direction_label = article.direction.capitalize()
@@ -44,6 +61,9 @@ def _format_alert(article: Article) -> str:
     if article.category:
         tier = f" [{article.impact_tier.upper()}]" if article.impact_tier else ""
         lines.append(f"📋 {_e(article.category)}{_e(tier)}")
+    price_line = _format_price_line(quote)
+    if price_line:
+        lines.append(_e(price_line))
     lines += [
         f"Confidence: {confidence_pct}%",
         f"Materiality: {round(article.materiality_score * 100)}% | Horizon: {_e(article.impact_horizon)}",
@@ -77,11 +97,11 @@ def _dispatch(text: str) -> bool:
         return False
 
 
-def send_alert(article: Article) -> bool:
+def send_alert(article: Article, quote: dict | None = None) -> bool:
     """Send a high-confidence alert for one article. Returns True on success —
     caller (pipeline.py) marks alert_sent only when this returns True, so a
     failed send is retried on the next cycle instead of silently lost."""
-    return _dispatch(_format_alert(article))
+    return _dispatch(_format_alert(article, quote))
 
 
 def send_startup_message() -> bool:

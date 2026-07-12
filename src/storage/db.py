@@ -51,6 +51,9 @@ def _ensure_schema(engine) -> None:
         "is_material": "ALTER TABLE articles ADD COLUMN is_material BOOLEAN DEFAULT 0",
         "category": "ALTER TABLE articles ADD COLUMN category VARCHAR DEFAULT ''",
         "impact_tier": "ALTER TABLE articles ADD COLUMN impact_tier VARCHAR DEFAULT ''",
+        "ret_1d": "ALTER TABLE articles ADD COLUMN ret_1d FLOAT",
+        "ret_3d": "ALTER TABLE articles ADD COLUMN ret_3d FLOAT",
+        "ret_5d": "ALTER TABLE articles ADD COLUMN ret_5d FLOAT",
     }
     with engine.begin() as conn:
         for column, ddl in additions.items():
@@ -147,6 +150,26 @@ def get_pending_alert_articles(
         .limit(limit)
     )
     return list(session.execute(stmt).scalars())
+
+
+def get_hit_rate_stats(session: Session, horizon: str = "ret_3d") -> dict[str, dict]:
+    """Per-event-type {n, hits} over alerted articles whose `horizon` return has
+    matured. A 'hit' = the predicted direction matched the sign of the move.
+    Feeds the calibrated confidence model."""
+    column = getattr(Article, horizon)
+    stmt = select(Article.event_type, Article.direction, column).where(
+        Article.alert_sent == True,  # noqa: E712
+        column.is_not(None),
+        Article.direction != "neutral",
+    )
+    stats: dict[str, dict] = {}
+    for event_type, direction, ret in session.execute(stmt):
+        s = stats.setdefault(event_type, {"n": 0, "hits": 0})
+        s["n"] += 1
+        hit = (direction == "bullish" and ret > 0) or (direction == "bearish" and ret < 0)
+        if hit:
+            s["hits"] += 1
+    return stats
 
 
 def get_todays_stats(session: Session) -> dict:

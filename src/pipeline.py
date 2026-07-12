@@ -19,8 +19,10 @@ from src.config import configure_logging, get_settings
 from src.ingestion.common import RawArticle
 from src.ingestion.nse_announcements import fetch_nse_market_wide
 from src.ingestion.pdf_extract import extract_pdf_text
-from src.scoring.confidence import StaticTableConfidenceProvider
+from src.scoring.confidence import BacktestedConfidenceProvider
 from src.scoring.impact import DROP, HIGH, category_impact
+from src.scoring.market_data import get_quote
+from src.scoring.outcomes import track_outcomes
 from src.scoring.source_quality import get_source_quality, is_directional_material_alert
 from src.storage.db import (
     article_exists,
@@ -148,8 +150,10 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
     # numbers, order value, rating) rather than NSE's generic category tag. This
     # is what lets a material filing hidden under "General Updates" get seen.
     if raw.category and raw.attachment_url and not raw.body:
+        # Read deeper for HIGH-impact filings so results tables aren't truncated.
+        max_chars = 3500 if impact_tier == HIGH else 2000
         try:
-            body = extract_pdf_text(raw.attachment_url)
+            body = extract_pdf_text(raw.attachment_url, max_chars=max_chars)
             if body:
                 raw.body = body
                 logger.info("pipeline: read PDF (%d chars) for %s", len(body), raw.ticker)
@@ -229,7 +233,7 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
         impact_tier=impact_tier,
     ):
         try:
-            if send_alert(article):
+            if send_alert(article, quote=get_quote(article.ticker)):
                 mark_alert_sent(session, article.id)
                 outcome["alerted"] = True
         except Exception as exc:
@@ -251,7 +255,7 @@ def _send_pending_alerts(session, settings) -> int:
     )
     for article in pending:
         try:
-            if send_alert(article):
+            if send_alert(article, quote=get_quote(article.ticker)):
                 mark_alert_sent(session, article.id)
                 sent += 1
         except Exception as exc:
@@ -268,8 +272,9 @@ def run_pipeline() -> dict:
     fetched = _gather_articles(settings)
     logger.info("pipeline: %d article(s) fetched this cycle", len(fetched))
 
-    confidence_provider = StaticTableConfidenceProvider(settings.confidence_base_rates)
     session = get_session()
+    # Calibrated confidence: static prior shrunk toward measured hit-rates.
+    confidence_provider = BacktestedConfidenceProvider(session, settings.confidence_base_rates)
     totals = {"fetched": len(fetched), "new": 0, "classified": 0, "alerted": 0}
 
     try:
@@ -285,6 +290,13 @@ def run_pipeline() -> dict:
             for key in ("new", "classified", "alerted"):
                 totals[key] += int(outcome[key])
         totals["alerted"] += _send_pending_alerts(session, settings)
+        # Measurement loop: fill in matured forward returns for past alerts, which
+        # feed the calibrated confidence model above. Bounded so it never
+        # dominates a cycle; fails soft (yfinance can be flaky).
+        try:
+            track_outcomes(session, limit=15)
+        except Exception as exc:
+            logger.error("pipeline: outcome tracking crashed: %s", exc)
     finally:
         session.close()
 
