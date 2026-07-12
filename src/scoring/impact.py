@@ -61,18 +61,22 @@ _MEDIUM_KEYWORDS = [
     "analyst", "investor meet", "institutional investor",
 ]
 
+# Narrow on purpose: these categories are procedural REGARDLESS of PDF content, so
+# we skip them before downloading/reading the attachment. Everything else — even
+# generic-looking "Newspaper Publication" / "General Updates" / "Shareholders
+# meeting" — is NOT dropped, because those routinely wrap the actual results,
+# dividend, or rating inside the PDF (which the pipeline now reads). The LLM then
+# assigns low materiality to the ones that turn out to be genuinely procedural.
 _DROP_KEYWORDS = [
-    "certificate under", "regulation 74", "regulation 40", "regulation 7",
+    "certificate under sebi (depositories", "regulation 74", "regulation 40(9)",
+    "regulation 7(3)", "regulation 7 (3)",
     "reconciliation of share capital",
     "trading window", "closure of trading window",
-    "newspaper publication", "newspaper advertisement", "advertisement",
     "compliance certificate", "compliance report",
-    "investor complaint", "grievance", "investor grievance",
+    "investor complaint", "investor grievance", "grievance redressal",
     "loss of share", "duplicate share", "issue of duplicate",
-    "record date", "book closure", "postal ballot notice",
-    "annual report", "notice of", "intimation of",  # bare notices, often procedural
-    "scrutinizer", "voting results", "proceedings of",
-    "sub-broker", "certificate of",
+    "postal ballot", "scrutinizer", "voting results",
+    "sub-broker", "sub broker",
 ]
 
 

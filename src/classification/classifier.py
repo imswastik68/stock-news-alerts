@@ -47,16 +47,17 @@ _logged_unreachable_this_cycle = False
 _logged_rate_limited_this_cycle = False
 _rate_limited_this_cycle = False
 
-_SYSTEM_PROMPT = """Classify one Indian-stock news item. Return ONLY a JSON object, no other text.
+_SYSTEM_PROMPT = """You read an Indian-stock exchange filing (or news item) and classify it. The text may be extracted from a filing PDF, so ignore letterhead/addresses/boilerplate and focus on the substance. Return ONLY a JSON object, no other text.
 
-event_type (pick ONE): earnings_surprise (results beat/miss), guidance_change (company revises outlook), ma_deal (merger/acquisition/stake sale), analyst_rating (rating/target change), regulatory_legal (regulator/investigation/litigation), insider_activity (promoter/insider buy/sell), partnership_contract (order win/partnership), macro_sector (sector/macro), other.
+headline: a clean, factual one-line summary of what actually happened, with the key number if present (e.g. "Reports FY26 net profit up 29% to Rs 236 cr", "Wins Rs 5,000 cr order from NHAI", "Board recommends Rs 229 final dividend"). If the filing is purely procedural (newspaper notice, AGM intimation, trading-window closure, compliance certificate) say so plainly (e.g. "Routine AGM notice, no financial detail").
+event_type (pick ONE): earnings_surprise (results beat/miss), guidance_change (company revises outlook), ma_deal (merger/acquisition/stake sale), analyst_rating (rating/target change), regulatory_legal (regulator/investigation/litigation/penalty), insider_activity (promoter/insider buy/sell), partnership_contract (order win/partnership), macro_sector (sector/macro), other.
 direction: bullish | bearish | neutral (likely short-term price impact).
-reason: ONE sentence citing a fact from the item.
-magnitude_pct: number if stated (e.g. "beat by 12%" -> 12.0), else null. Never invent one.
-materiality_score: 0.0-1.0 — is this genuinely stock-moving for THIS company? High for real earnings/orders/M&A/regulatory/insider/buyback/dividend/rating actions; low for routine filings (board-meeting/investor-meet intimations), generic market commentary, old/repeated news, or "stock moved today" pieces.
+reason: ONE sentence citing a specific fact from the filing.
+magnitude_pct: number if stated (e.g. "profit up 29%" -> 29.0), else null. Never invent one.
+materiality_score: 0.0-1.0 — is this genuinely stock-moving for THIS company? HIGH for real results/orders/M&A/penalties/rating/buyback/dividend. LOW (below 0.3) for procedural notices (AGM/newspaper/trading-window/compliance-certificate/record-date) that carry no new financial fact.
 impact_horizon: intraday | 1_3_days | swing | long_term | unknown.
 
-Example: {"event_type":"earnings_surprise","direction":"bullish","reason":"EPS beat consensus by 12%.","magnitude_pct":12.0,"materiality_score":0.86,"impact_horizon":"1_3_days"}
+Example: {"headline":"Reports FY26 net profit up 29% to Rs 236 cr","event_type":"earnings_surprise","direction":"bullish","reason":"FY26 net profit rose 29% YoY to Rs 236 cr.","magnitude_pct":29.0,"materiality_score":0.88,"impact_horizon":"1_3_days"}
 """
 
 _STRICT_SUFFIX = (
@@ -100,11 +101,17 @@ def _throttle_groq() -> bool:
 
 
 def _build_user_message(article: RawArticle) -> str:
-    return (
-        f"Ticker: {article.ticker}\n"
-        f"Headline: {article.headline}\n"
-        f"Summary: {article.summary or '(none)'}"
-    )
+    lines = [f"Ticker: {article.ticker}"]
+    if article.category:
+        lines.append(f"Filing category: {article.category}")
+    lines.append(f"Title: {article.headline}")
+    # The PDF body is the real substance when present; fall back to the short
+    # summary/category for media items or unextractable filings.
+    if article.body:
+        lines.append(f"Filing content:\n{article.body}")
+    else:
+        lines.append(f"Summary: {article.summary or '(none)'}")
+    return "\n".join(lines)
 
 
 def _strip_wrapping(raw: str) -> str:

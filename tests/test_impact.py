@@ -21,16 +21,22 @@ def test_high_impact_catalyst_categories():
         assert is_high_impact_category(cat)
 
 
-def test_procedural_categories_dropped():
+def test_always_procedural_categories_dropped():
     for cat in [
         "Certificate under SEBI (Depositories and Participants) Regulations, 2018",
         "Closure of Trading Window",
-        "Newspaper Publication",
         "Compliance Certificate under Regulation 7(3)",
         "Reconciliation of Share Capital Audit Report",
         "Statement of Investor Complaints",
     ]:
         assert category_impact(cat) == DROP, cat
+
+
+def test_generic_categories_not_dropped_they_may_hide_content():
+    # These look procedural but routinely wrap real results/dividends/ratings in
+    # the PDF — must NOT be hard-dropped, so the pipeline reads their attachment.
+    for cat in ["Copy of Newspaper Publication", "General Updates", "Shareholders meeting"]:
+        assert category_impact(cat) != DROP, cat
 
 
 def test_medium_categories():

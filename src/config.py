@@ -126,7 +126,7 @@ def get_settings() -> Settings:
         alert_confidence_threshold=threshold,
         min_materiality_score=float(os.environ.get("MIN_MATERIALITY_SCORE", "0.65")),
         min_source_quality_for_alerts=float(os.environ.get("MIN_SOURCE_QUALITY_FOR_ALERTS", "0.55")),
-        max_articles_per_cycle=int(os.environ.get("MAX_ARTICLES_PER_CYCLE", "18")),
+        max_articles_per_cycle=int(os.environ.get("MAX_ARTICLES_PER_CYCLE", "10")),
         max_google_news_per_ticker=int(os.environ.get("MAX_GOOGLE_NEWS_PER_TICKER", "8")),
         max_news_age_hours=int(os.environ.get("MAX_NEWS_AGE_HOURS", "48")),
         daily_summary_enabled=_bool_env("DAILY_SUMMARY_ENABLED", True),

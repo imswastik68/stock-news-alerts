@@ -27,6 +27,10 @@ class ClassificationResult(BaseModel):
     event_type: EventType
     direction: Direction
     reason: str
+    # A clean, factual one-line summary of what the filing actually says (like the
+    # pro platforms' headlines), e.g. "Reports FY26 net profit up 29% to Rs 236 cr".
+    # Defaults empty for older/mocked results and media items.
+    headline: str = ""
     magnitude_pct: Optional[float] = None
     materiality_score: float = Field(
         default=0.5,

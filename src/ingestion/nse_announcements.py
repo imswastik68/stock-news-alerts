@@ -97,18 +97,27 @@ def _item_to_article(item: dict, cutoff: datetime) -> RawArticle | None:
         source="nse_announcements",
         published_at=filed_at.astimezone(timezone.utc),
         category=category,
+        attachment_url=attachment_url,
     )
 
 
-def fetch_nse_market_wide(hours_back: int = 12) -> list[RawArticle]:
-    """Rolling market-wide feed: the latest filings across ALL NSE stocks.
-    This is the backbone of the high-signal stream."""
+def fetch_nse_market_wide(hours_back: int = 36) -> list[RawArticle]:
+    """Market-wide feed across ALL NSE stocks, using the date-range endpoint so we
+    get the full history for the window (hundreds of filings) rather than just the
+    latest ~20 — otherwise material filings roll off before we see them. Dedup in
+    the pipeline stops re-processing across cycles."""
     session = _new_session()
     if session is None:
         return []
 
+    now_ist = datetime.now(IST)
+    params = {
+        "index": "equities",
+        "from_date": (now_ist - timedelta(hours=hours_back)).strftime("%d-%m-%Y"),
+        "to_date": now_ist.strftime("%d-%m-%Y"),
+    }
     try:
-        resp = session.get(_NSE_API, params={"index": "equities"}, timeout=15)
+        resp = session.get(_NSE_API, params=params, timeout=25)
         resp.raise_for_status()
         items = resp.json()
     except Exception as exc:
@@ -119,7 +128,7 @@ def fetch_nse_market_wide(hours_back: int = 12) -> list[RawArticle]:
         logger.warning("nse_announcements: unexpected market-wide response type")
         return []
 
-    cutoff = datetime.now(IST) - timedelta(hours=hours_back)
+    cutoff = now_ist - timedelta(hours=hours_back)
     articles = [a for a in (_item_to_article(it, cutoff) for it in items) if a is not None]
     logger.info("nse_announcements: %d market-wide filing(s) in last %dh", len(articles), hours_back)
     return articles

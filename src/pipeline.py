@@ -22,6 +22,7 @@ from src.ingestion.indian_rss import fetch_indian_rss
 from src.ingestion.newsapi import fetch_newsapi
 from src.ingestion.bse_announcements import fetch_bse_announcements
 from src.ingestion.nse_announcements import fetch_nse_announcements, fetch_nse_market_wide
+from src.ingestion.pdf_extract import extract_pdf_text
 from src.scoring.confidence import StaticTableConfidenceProvider
 from src.scoring.impact import DROP, HIGH, category_impact
 from src.scoring.materiality_filter import should_use_llm
@@ -116,14 +117,24 @@ def _filter_recent_articles(articles: list[RawArticle], max_age_hours: int) -> l
 
 def _gather_market_wide(settings) -> list[RawArticle]:
     """Market-wide mode: the exchange-filing backbone — every company's NSE
-    filing, minute-fresh. No per-ticker media (media needs a company name to map
-    to a ticker, which only exists in watchlist mode)."""
+    filing. No per-ticker media (media needs a company name to map to a ticker,
+    which only exists in watchlist mode)."""
     articles: list[RawArticle] = []
     try:
         articles.extend(fetch_nse_market_wide())
     except Exception as exc:
         logger.error("pipeline: nse_market_wide fetch crashed: %s", exc)
-    return articles
+
+    # Hard-drop always-procedural categories BEFORE the per-cycle cap, so the
+    # limited classification budget goes to potentially-material filings, not
+    # trading-window notices and compliance certificates.
+    kept = [a for a in articles if category_impact(a.category) != DROP]
+    if len(kept) < len(articles):
+        logger.info(
+            "pipeline: dropped %d always-procedural filing(s) pre-LLM",
+            len(articles) - len(kept),
+        )
+    return kept
 
 
 def _gather_watchlist(settings) -> list[RawArticle]:
@@ -221,6 +232,17 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             logger.error("pipeline: failed to store prefilter-skipped article: %s", exc)
         return outcome
 
+    # Read the filing's PDF so we classify on the actual content (results
+    # numbers, order value, rating) rather than NSE's generic category tag. This
+    # is what lets a material filing hidden under "General Updates" get seen.
+    if raw.category and raw.attachment_url and not raw.body:
+        try:
+            body = extract_pdf_text(raw.attachment_url)
+            if body:
+                raw.body = body
+        except Exception as exc:
+            logger.debug("pipeline: pdf extract crashed for %r: %s", raw.headline[:60], exc)
+
     try:
         result = classify(raw)
     except Exception as exc:
@@ -253,11 +275,16 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
     # LLM's own materiality estimate.
     is_material = impact_tier == HIGH or result.materiality_score >= settings.min_materiality_score
 
+    # Prefer the LLM's clean one-line headline (built from the PDF content) over
+    # NSE's boilerplate title — this is what makes the alert read like the pro
+    # platforms ("Reports FY26 profit up 29%…" vs "informed the Exchange about…").
+    display_headline = result.headline.strip() if result.headline.strip() else raw.headline
+
     try:
         article = save_article(
             session,
             ticker=raw.ticker,
-            headline=raw.headline,
+            headline=display_headline,
             url=raw.url,
             source=raw.source,
             published_at=raw.published_at,
