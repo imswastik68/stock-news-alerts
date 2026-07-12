@@ -35,6 +35,26 @@ def test_alert_gate_requires_directional_material_high_quality_news():
     )
 
 
+def test_high_impact_directional_alerts_even_below_confidence_threshold():
+    # An order win (partnership_contract, base 0.55) can never reach the 0.70
+    # confidence threshold — but a HIGH-impact category + directional view must
+    # still alert. This is the fix for "most catalysts never alert".
+    common = dict(
+        confidence=0.58, source_quality=1.0, alert_confidence_threshold=0.70,
+        min_materiality_score=0.65, min_source_quality_for_alerts=0.55,
+        excluded_event_types={"other", "classification_failed"},
+    )
+    assert is_directional_material_alert(
+        _result(event_type="partnership_contract", direction="bullish", materiality_score=0.5),
+        impact_tier="high", **common,
+    )
+    # but a NEUTRAL high-impact filing still must not alert (no directional view)
+    assert not is_directional_material_alert(
+        _result(event_type="partnership_contract", direction="neutral"),
+        impact_tier="high", **common,
+    )
+
+
 def test_alert_gate_rejects_neutral_low_materiality_or_low_quality():
     common = {
         "confidence": 0.90,

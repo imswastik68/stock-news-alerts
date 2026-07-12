@@ -40,11 +40,15 @@ def is_directional_material_alert(
         return False
     if source_quality < min_source_quality_for_alerts:
         return False
-    if confidence < alert_confidence_threshold:
-        return False
-    # A HIGH-impact exchange category (order win, M&A, results, rating, penalty…)
-    # establishes materiality by itself, so it need not also clear the LLM's
-    # materiality estimate. Everything else must.
+    # A HIGH-impact exchange category (order win, M&A, results, rating, penalty,
+    # buyback, insolvency…) with a directional LLM view is a genuine catalyst —
+    # alert it regardless of the event-type confidence prior OR the materiality
+    # estimate. This bypass is essential: most event types' base rates sit below
+    # the 0.70 threshold (order wins/penalties = 0.55/0.60), so without it a real
+    # order win or SEBI penalty could NEVER alert. Runs before the confidence
+    # check for exactly that reason.
     if impact_tier == "high":
         return True
+    if confidence < alert_confidence_threshold:
+        return False
     return result.materiality_score >= min_materiality_score
