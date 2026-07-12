@@ -240,8 +240,11 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             body = extract_pdf_text(raw.attachment_url)
             if body:
                 raw.body = body
+                logger.info("pipeline: read PDF (%d chars) for %s", len(body), raw.ticker)
+            else:
+                logger.info("pipeline: PDF unreadable for %s (scanned/blocked)", raw.ticker)
         except Exception as exc:
-            logger.debug("pipeline: pdf extract crashed for %r: %s", raw.headline[:60], exc)
+            logger.warning("pipeline: pdf extract crashed for %s: %s", raw.ticker, exc)
 
     try:
         result = classify(raw)
