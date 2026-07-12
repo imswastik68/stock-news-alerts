@@ -17,15 +17,10 @@ from datetime import datetime, timedelta, timezone
 from src.classification.classifier import classify, is_rate_limited, reset_cycle_state
 from src.config import configure_logging, get_settings
 from src.ingestion.common import RawArticle
-from src.ingestion.google_news import fetch_google_news
-from src.ingestion.indian_rss import fetch_indian_rss
-from src.ingestion.newsapi import fetch_newsapi
-from src.ingestion.bse_announcements import fetch_bse_announcements
-from src.ingestion.nse_announcements import fetch_nse_announcements, fetch_nse_market_wide
+from src.ingestion.nse_announcements import fetch_nse_market_wide
 from src.ingestion.pdf_extract import extract_pdf_text
 from src.scoring.confidence import StaticTableConfidenceProvider
 from src.scoring.impact import DROP, HIGH, category_impact
-from src.scoring.materiality_filter import should_use_llm
 from src.scoring.source_quality import get_source_quality, is_directional_material_alert
 from src.storage.db import (
     article_exists,
@@ -40,16 +35,6 @@ from src.alerting.telegram_bot import send_alert
 logger = logging.getLogger(__name__)
 
 _EXCLUDED_FROM_ALERTS = {"other", "classification_failed"}
-_SOURCE_PRIORITY = {
-    "nse_announcements": 0,
-    "bse_announcements": 1,
-    "moneycontrol": 2,
-    "economic_times": 3,
-    "newsapi": 4,
-    "google_news": 5,
-}
-
-
 _IMPACT_RANK = {HIGH: 0, "medium": 1}
 
 
@@ -60,15 +45,10 @@ def _trim_articles_for_cycle(articles: list[RawArticle], max_articles: int) -> l
     # HIGH-impact categories first (order wins, M&A, results, ratings, bonus,
     # dividend, penalties), then by recency. Under the free-tier per-cycle cap
     # this is what matters most: a genuine catalyst must not wait behind a queue
-    # of procedural "General Updates"/"Newspaper Publication" filings. Source
-    # priority breaks ties (exchange filings over media).
+    # of procedural "General Updates"/"Newspaper Publication" filings.
     def _rank(a: RawArticle):
         tier = category_impact(a.category) if a.category else "medium"
-        return (
-            _IMPACT_RANK.get(tier, 1),
-            _SOURCE_PRIORITY.get(a.source, 99),
-            -a.published_at.timestamp(),
-        )
+        return (_IMPACT_RANK.get(tier, 1), -a.published_at.timestamp())
 
     ordered = sorted(articles, key=_rank)
     logger.info(
@@ -103,24 +83,13 @@ def _filter_recent_articles(articles: list[RawArticle], max_age_hours: int) -> l
     return recent
 
 
-def _gather_market_wide(settings) -> list[RawArticle]:
-    """Market-wide mode: the exchange-filing backbone — every company's NSE
-    filing. No per-ticker media (media needs a company name to map to a ticker,
-    which only exists in watchlist mode)."""
+def _gather_articles(settings) -> list[RawArticle]:
+    """The exchange-filing backbone: every company's NSE filing, market-wide."""
     articles: list[RawArticle] = []
     try:
         articles.extend(fetch_nse_market_wide())
     except Exception as exc:
         logger.error("pipeline: nse_market_wide fetch crashed: %s", exc)
-
-    # BSE-exclusive scrips (NSE market-wide misses BSE-only stocks). Add only
-    # BSE-EXCLUSIVE names to bse_watchlist.yaml — dual-listed ones are already in
-    # the NSE feed and would double-alert.
-    if settings.bse_watchlist:
-        try:
-            articles.extend(fetch_bse_announcements(settings.bse_watchlist, hours_back=36))
-        except Exception as exc:
-            logger.error("pipeline: bse_announcements fetch crashed: %s", exc)
 
     # Hard-drop always-procedural categories BEFORE the per-cycle cap, so the
     # limited classification budget goes to potentially-material filings, not
@@ -131,65 +100,9 @@ def _gather_market_wide(settings) -> list[RawArticle]:
             "pipeline: dropped %d always-procedural filing(s) pre-LLM",
             len(articles) - len(kept),
         )
-    return kept
 
-
-def _gather_watchlist(settings) -> list[RawArticle]:
-    tickers = [e.ticker for e in settings.watchlist]
-    name_pairs = [(e.ticker, e.name) for e in settings.watchlist]
-
-    articles: list[RawArticle] = []
-
-    try:
-        articles.extend(fetch_nse_announcements(tickers))
-    except Exception as exc:
-        logger.error("pipeline: nse_announcements fetch crashed: %s", exc)
-
-    try:
-        articles.extend(fetch_bse_announcements(settings.watchlist))
-    except Exception as exc:
-        logger.error("pipeline: bse_announcements fetch crashed: %s", exc)
-
-    try:
-        articles.extend(fetch_indian_rss(settings.watchlist))
-    except Exception as exc:
-        logger.error("pipeline: indian_rss fetch crashed: %s", exc)
-
-    try:
-        articles.extend(fetch_google_news(name_pairs))
-    except Exception as exc:
-        logger.error("pipeline: google_news fetch crashed: %s", exc)
-
-    session = get_session()
-    try:
-        for ticker, name in name_pairs:
-            try:
-                articles.extend(fetch_newsapi(session, ticker, name))
-            except Exception as exc:
-                logger.error("pipeline: newsapi fetch crashed for %s: %s", ticker, exc)
-    finally:
-        session.close()
-
-    return articles
-
-
-def _gather_articles(settings) -> list[RawArticle]:
-    if settings.coverage_mode == "watchlist":
-        articles = _gather_watchlist(settings)
-    else:
-        articles = _gather_market_wide(settings)
-
-    articles = _filter_recent_articles(articles, settings.max_news_age_hours)
-    return _trim_articles_for_cycle(articles, settings.max_articles_per_cycle)
-
-
-def _prefilter_passes(raw: RawArticle, impact_tier: str) -> bool:
-    """Decide whether an article is worth an (LLM) classification call.
-    Exchange filings are gated by impact tier (drop procedural categories);
-    media by the keyword materiality prefilter."""
-    if raw.category:  # exchange filing
-        return impact_tier != DROP
-    return should_use_llm(raw)
+    kept = _filter_recent_articles(kept, settings.max_news_age_hours)
+    return _trim_articles_for_cycle(kept, settings.max_articles_per_cycle)
 
 
 def _process_article(session, confidence_provider, settings, raw: RawArticle) -> dict:
@@ -203,9 +116,11 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
     outcome["new"] = True
 
     source_quality = get_source_quality(raw.source)
-    impact_tier = category_impact(raw.category) if raw.category else ""
+    impact_tier = category_impact(raw.category)
 
-    if not _prefilter_passes(raw, impact_tier):
+    # Always-procedural categories are dropped in _gather_articles; this catches
+    # any that slip through (store without spending an LLM call).
+    if impact_tier == DROP:
         try:
             save_article(
                 session,
@@ -216,14 +131,14 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
                 published_at=raw.published_at,
                 category=raw.category,
                 impact_tier=impact_tier,
-                event_type="procedural" if raw.category else "other",
+                event_type="procedural",
                 direction="neutral",
                 confidence=0.0,
                 materiality_score=0.0,
                 impact_horizon="unknown",
                 source_quality=source_quality,
                 is_material=False,
-                reasoning="Filtered out before LLM (procedural filing / non-material media).",
+                reasoning="Procedural filing filtered out before LLM.",
             )
         except Exception as exc:
             logger.error("pipeline: failed to store prefilter-skipped article: %s", exc)

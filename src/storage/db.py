@@ -9,7 +9,7 @@ from sqlalchemy import create_engine, inspect, select, text
 from sqlalchemy.orm import Session, sessionmaker
 
 from src.config import get_settings
-from src.storage.models import ApiUsage, Article, Base, TickerFetchLog, utcnow
+from src.storage.models import Article, Base
 
 _engine = None
 _SessionLocal = None
@@ -157,48 +157,3 @@ def get_todays_stats(session: Session) -> dict:
         "processed": len(articles),
         "alerts_sent": sum(1 for a in articles if a.alert_sent),
     }
-
-
-def _today_str() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
-
-
-def get_api_usage_today(session: Session, source: str) -> int:
-    today = _today_str()
-    stmt = select(ApiUsage).where(ApiUsage.date == today, ApiUsage.source == source)
-    row = session.execute(stmt).scalar_one_or_none()
-    return row.count if row else 0
-
-
-def increment_api_usage(session: Session, source: str) -> None:
-    today = _today_str()
-    stmt = select(ApiUsage).where(ApiUsage.date == today, ApiUsage.source == source)
-    row = session.execute(stmt).scalar_one_or_none()
-    if row is None:
-        row = ApiUsage(date=today, source=source, count=1)
-        session.add(row)
-    else:
-        row.count += 1
-    session.commit()
-
-
-def get_last_ticker_fetch(session: Session, ticker: str, source: str) -> datetime | None:
-    stmt = select(TickerFetchLog).where(
-        TickerFetchLog.ticker == ticker, TickerFetchLog.source == source
-    )
-    row = session.execute(stmt).scalar_one_or_none()
-    return row.last_fetched_at if row else None
-
-
-def set_last_ticker_fetch(session: Session, ticker: str, source: str) -> None:
-    stmt = select(TickerFetchLog).where(
-        TickerFetchLog.ticker == ticker, TickerFetchLog.source == source
-    )
-    row = session.execute(stmt).scalar_one_or_none()
-    now = utcnow()
-    if row is None:
-        row = TickerFetchLog(ticker=ticker, source=source, last_fetched_at=now)
-        session.add(row)
-    else:
-        row.last_fetched_at = now
-    session.commit()

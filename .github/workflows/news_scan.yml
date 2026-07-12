@@ -45,7 +45,6 @@ jobs:
 
       - name: Scan loop (every 2 min for ~5h)
         env:
-          COVERAGE_MODE: market_wide
           DRY_RUN: "false"
           LOG_LEVEL: INFO
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}

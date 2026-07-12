@@ -85,7 +85,7 @@ def send_alert(article: Article) -> bool:
 
 
 def send_startup_message() -> bool:
-    return _dispatch("🟢 <b>stock-news-alerts</b> is online and monitoring your watchlist.")
+    return _dispatch("🟢 <b>stock-news-alerts</b> is online and monitoring NSE filings.")
 
 
 def send_daily_summary(processed: int, alerts_sent: int) -> bool:

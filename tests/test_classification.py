@@ -33,7 +33,7 @@ def _article() -> RawArticle:
         headline="Reliance Q1 profit beats estimates by 12%",
         summary="EPS beat consensus, revenue also ahead",
         url="https://example.com/article",
-        source="google_news",
+        source="nse_announcements",
         published_at=datetime.now(timezone.utc),
     )
 

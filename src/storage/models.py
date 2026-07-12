@@ -43,28 +43,3 @@ class Article(Base):
     reasoning: Mapped[str] = mapped_column(String)
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
-
-
-class ApiUsage(Base):
-    """Tracks daily request counts per source (currently used for the NewsAPI
-    100 req/day free-tier budget) and, via last_ticker_fetch, the last time each
-    ticker was queried against a rate-limited source."""
-
-    __tablename__ = "api_usage"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    date: Mapped[str] = mapped_column(String, index=True)  # YYYY-MM-DD (UTC)
-    source: Mapped[str] = mapped_column(String, index=True)
-    count: Mapped[int] = mapped_column(Integer, default=0)
-
-
-class TickerFetchLog(Base):
-    """Last time a rate-limited source (NewsAPI) was queried for a given ticker,
-    used to enforce a minimum interval between queries per ticker."""
-
-    __tablename__ = "ticker_fetch_log"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    ticker: Mapped[str] = mapped_column(String, index=True)
-    source: Mapped[str] = mapped_column(String, index=True)
-    last_fetched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

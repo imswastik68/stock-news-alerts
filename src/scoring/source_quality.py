@@ -11,11 +11,6 @@ from src.classification.schema import ClassificationResult
 
 SOURCE_QUALITY = {
     "nse_announcements": 1.0,
-    "bse_announcements": 1.0,
-    "moneycontrol": 0.75,
-    "economic_times": 0.75,
-    "newsapi": 0.70,
-    "google_news": 0.55,
 }
 
 

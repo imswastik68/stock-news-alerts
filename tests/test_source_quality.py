@@ -19,7 +19,6 @@ def _result(**overrides):
 
 def test_official_sources_score_highest():
     assert get_source_quality("nse_announcements") == 1.0
-    assert get_source_quality("bse_announcements") == 1.0
     assert get_source_quality("unknown_blog") == 0.40
 
 
