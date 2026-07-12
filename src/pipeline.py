@@ -50,46 +50,34 @@ _SOURCE_PRIORITY = {
 }
 
 
+_IMPACT_RANK = {HIGH: 0, "medium": 1}
+
+
 def _trim_articles_for_cycle(articles: list[RawArticle], max_articles: int) -> list[RawArticle]:
     if max_articles <= 0 or len(articles) <= max_articles:
         return articles
 
-    # Round-robin BY TICKER so every watchlist stock gets classification slots,
-    # instead of a few chatty stocks (or a burst of procedural NSE filings)
-    # eating the whole budget and starving the rest. Within each ticker, keep
-    # the highest-quality source first, then freshest. This is what gives
-    # broad per-stock coverage under the Groq free-tier token limit.
-    by_ticker: dict[str, list[RawArticle]] = {}
-    for article in articles:
-        by_ticker.setdefault(article.ticker, []).append(article)
-    for ticker_articles in by_ticker.values():
-        ticker_articles.sort(
-            key=lambda a: (_SOURCE_PRIORITY.get(a.source, 99), -a.published_at.timestamp())
+    # HIGH-impact categories first (order wins, M&A, results, ratings, bonus,
+    # dividend, penalties), then by recency. Under the free-tier per-cycle cap
+    # this is what matters most: a genuine catalyst must not wait behind a queue
+    # of procedural "General Updates"/"Newspaper Publication" filings. Source
+    # priority breaks ties (exchange filings over media).
+    def _rank(a: RawArticle):
+        tier = category_impact(a.category) if a.category else "medium"
+        return (
+            _IMPACT_RANK.get(tier, 1),
+            _SOURCE_PRIORITY.get(a.source, 99),
+            -a.published_at.timestamp(),
         )
 
-    selected: list[RawArticle] = []
-    queues = list(by_ticker.values())
-    round_idx = 0
-    while len(selected) < max_articles:
-        progressed = False
-        for queue in queues:
-            if round_idx < len(queue):
-                selected.append(queue[round_idx])
-                progressed = True
-                if len(selected) >= max_articles:
-                    break
-        if not progressed:
-            break
-        round_idx += 1
-
+    ordered = sorted(articles, key=_rank)
     logger.info(
         "pipeline: limiting classification workload from %d to %d article(s) "
-        "(round-robin across %d ticker(s))",
+        "(high-impact categories first)",
         len(articles),
-        len(selected),
-        len(by_ticker),
+        max_articles,
     )
-    return selected
+    return ordered[:max_articles]
 
 
 def _filter_recent_articles(articles: list[RawArticle], max_age_hours: int) -> list[RawArticle]:
