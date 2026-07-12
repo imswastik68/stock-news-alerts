@@ -1,7 +1,17 @@
 # Running 24/7 free on GitHub Actions
 
-No card, no server. GitHub runs `pipeline --once` on a schedule; the workflow is
-already in `.github/workflows/news_scan.yml`.
+No card, no server. The workflow (`.github/workflows/news_scan.yml`) uses an
+**internal loop**: each triggered run stays alive and scans every 2 min for up to
+~5 hours, then exits. This is deliberate — GitHub throttles high-frequency free
+cron schedules (a `*/5` can get deprioritized to once every few hours), so one
+long-running loop bridges the gaps instead of relying on frequent triggers.
+`cancel-in-progress` means the newest trigger always wins and runs never pile up.
+
+**Requires a PUBLIC repo** (long runs need unlimited Actions minutes — see below).
+
+To keep it going: the hourly `schedule` trigger restarts the loop; if GitHub goes
+quiet for hours, the current ~5h loop keeps scanning. If a run ever ends with no
+new trigger yet, start one with `gh workflow run news-scan` (or the Actions UI).
 
 ## ⚠️ The one thing that decides if this works
 GitHub's runners have **US datacenter IPs**, and NSE blocks many of those. Step 5
