@@ -1,22 +1,24 @@
 name: news-scan
 
-# Runs one pipeline cycle on a schedule. GitHub's cron minimum is 5 min and runs
-# are best-effort (may be delayed under load) — this is the free-tier version of
-# "real-time". workflow_dispatch lets you trigger a run by hand to test.
+# GitHub throttles high-frequency free schedules hard (a */5 cron can get
+# deprioritized to once every few hours). So instead of one scan per trigger,
+# each triggered run stays alive and scans every 2 min for up to ~5 hours. Even
+# if GitHub only fires the trigger sporadically, one long-running loop bridges
+# the gap. cancel-in-progress means the newest trigger always wins (a fresh loop)
+# and runs never pile up.
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 * * * *"   # nominal hourly; GitHub honors it sporadically — the loop covers the gaps
   workflow_dispatch: {}
 
-# Never let two cycles run at once (they'd race on the SQLite dedup DB).
 concurrency:
   group: news-scan
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 jobs:
   scan:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 340   # under GitHub's 6h hard cap; loop below runs ~5h then exits cleanly
     steps:
       - uses: actions/checkout@v4
 
@@ -28,9 +30,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      # Persist the dedup DB across runs. Runners are ephemeral, so without this
-      # every filing looks "new" each run and you'd get re-alerted endlessly.
-      # Unique key per run + prefix restore = rolling state that always re-saves.
+      # Dedup state across runs. Within a single run the local DB gives perfect
+      # dedup; this bridges it across run boundaries. Unique key per run + prefix
+      # restore = rolling state that always re-saves.
       - name: Restore dedup DB
         uses: actions/cache/restore@v4
         with:
@@ -41,7 +43,7 @@ jobs:
       - name: Ensure DB schema
         run: python init_db.py
 
-      - name: Run one pipeline cycle
+      - name: Scan loop (every 2 min for ~5h)
         env:
           COVERAGE_MODE: market_wide
           DRY_RUN: "false"
@@ -49,7 +51,17 @@ jobs:
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python -m src.pipeline --once
+        run: |
+          end=$(( $(date +%s) + 300*60 ))   # loop for ~5 hours
+          n=0
+          while [ "$(date +%s)" -lt "$end" ]; do
+            n=$((n+1))
+            echo "::group::scan #$n at $(date -u +%H:%M:%SZ)"
+            python -m src.pipeline --once || echo "cycle errored (continuing)"
+            echo "::endgroup::"
+            sleep 120
+          done
+          echo "loop finished after $n scans"
 
       - name: Save dedup DB
         if: always()
