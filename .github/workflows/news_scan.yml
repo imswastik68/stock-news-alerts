@@ -1,0 +1,59 @@
+name: news-scan
+
+# Runs one pipeline cycle on a schedule. GitHub's cron minimum is 5 min and runs
+# are best-effort (may be delayed under load) — this is the free-tier version of
+# "real-time". workflow_dispatch lets you trigger a run by hand to test.
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch: {}
+
+# Never let two cycles run at once (they'd race on the SQLite dedup DB).
+concurrency:
+  group: news-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      # Persist the dedup DB across runs. Runners are ephemeral, so without this
+      # every filing looks "new" each run and you'd get re-alerted endlessly.
+      # Unique key per run + prefix restore = rolling state that always re-saves.
+      - name: Restore dedup DB
+        uses: actions/cache/restore@v4
+        with:
+          path: stock_news.db
+          key: news-db-${{ github.run_id }}
+          restore-keys: news-db-
+
+      - name: Ensure DB schema
+        run: python init_db.py
+
+      - name: Run one pipeline cycle
+        env:
+          COVERAGE_MODE: market_wide
+          DRY_RUN: "false"
+          LOG_LEVEL: INFO
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python -m src.pipeline --once
+
+      - name: Save dedup DB
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: stock_news.db
+          key: news-db-${{ github.run_id }}

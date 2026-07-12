@@ -1,0 +1,35 @@
+nohup: ignoring input
+2026-07-11 01:35:49,706 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-11 01:35:49,707 [INFO] apscheduler.scheduler: Adding job tentatively -- it will be properly scheduled when the scheduler starts
+2026-07-11 01:35:57,286 [INFO] __main__: scheduler: starting — polling every 2 min, daily summary at 18:00 IST
+2026-07-11 01:36:07,109 [INFO] src.ingestion.nse_announcements: nse_announcements: 20 market-wide filing(s) in last 12h
+2026-07-11 01:36:07,109 [INFO] src.pipeline: pipeline: limiting classification workload from 20 to 18 article(s) (round-robin across 11 ticker(s))
+2026-07-11 01:36:07,110 [INFO] src.pipeline: pipeline: 18 article(s) fetched this cycle
+2026-07-11 01:36:15,344 [INFO] src.pipeline: pipeline: cycle complete — fetched=18 new=18 classified=15 alerted=0
+2026-07-11 01:36:15,345 [INFO] apscheduler.scheduler: Added job "_run_pipeline_job" to job store "default"
+2026-07-11 01:36:15,345 [INFO] apscheduler.scheduler: Added job "_daily_summary_job" to job store "default"
+2026-07-11 01:36:15,345 [INFO] apscheduler.scheduler: Scheduler started
+2026-07-11 01:37:49,707 [INFO] apscheduler.executors.default: Running job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:37:49 IST)" (scheduled at 2026-07-11 01:37:49.706520+05:30)
+2026-07-11 01:37:50,202 [INFO] src.ingestion.nse_announcements: nse_announcements: 20 market-wide filing(s) in last 12h
+2026-07-11 01:37:50,202 [INFO] src.pipeline: pipeline: limiting classification workload from 20 to 18 article(s) (round-robin across 11 ticker(s))
+2026-07-11 01:37:50,202 [INFO] src.pipeline: pipeline: 18 article(s) fetched this cycle
+2026-07-11 01:37:50,207 [INFO] src.pipeline: pipeline: cycle complete — fetched=18 new=0 classified=0 alerted=0
+2026-07-11 01:37:50,207 [INFO] apscheduler.executors.default: Job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:39:49 IST)" executed successfully
+2026-07-11 01:39:49,707 [INFO] apscheduler.executors.default: Running job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:41:49 IST)" (scheduled at 2026-07-11 01:39:49.706520+05:30)
+2026-07-11 01:39:50,036 [INFO] src.ingestion.nse_announcements: nse_announcements: 20 market-wide filing(s) in last 12h
+2026-07-11 01:39:50,036 [INFO] src.pipeline: pipeline: limiting classification workload from 20 to 18 article(s) (round-robin across 11 ticker(s))
+2026-07-11 01:39:50,036 [INFO] src.pipeline: pipeline: 18 article(s) fetched this cycle
+2026-07-11 01:39:50,041 [INFO] src.pipeline: pipeline: cycle complete — fetched=18 new=0 classified=0 alerted=0
+2026-07-11 01:39:50,041 [INFO] apscheduler.executors.default: Job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:41:49 IST)" executed successfully
+2026-07-11 01:41:49,707 [INFO] apscheduler.executors.default: Running job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:43:49 IST)" (scheduled at 2026-07-11 01:41:49.706520+05:30)
+2026-07-11 01:41:50,159 [INFO] src.ingestion.nse_announcements: nse_announcements: 20 market-wide filing(s) in last 12h
+2026-07-11 01:41:50,159 [INFO] src.pipeline: pipeline: limiting classification workload from 20 to 18 article(s) (round-robin across 11 ticker(s))
+2026-07-11 01:41:50,159 [INFO] src.pipeline: pipeline: 18 article(s) fetched this cycle
+2026-07-11 01:41:50,163 [INFO] src.pipeline: pipeline: cycle complete — fetched=18 new=0 classified=0 alerted=0
+2026-07-11 01:41:50,163 [INFO] apscheduler.executors.default: Job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:43:49 IST)" executed successfully
+2026-07-11 01:43:49,707 [INFO] apscheduler.executors.default: Running job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:45:49 IST)" (scheduled at 2026-07-11 01:43:49.706520+05:30)
+2026-07-11 01:43:51,090 [INFO] src.ingestion.nse_announcements: nse_announcements: 20 market-wide filing(s) in last 12h
+2026-07-11 01:43:51,090 [INFO] src.pipeline: pipeline: limiting classification workload from 20 to 18 article(s) (round-robin across 11 ticker(s))
+2026-07-11 01:43:51,091 [INFO] src.pipeline: pipeline: 18 article(s) fetched this cycle
+2026-07-11 01:43:51,095 [INFO] src.pipeline: pipeline: cycle complete — fetched=18 new=0 classified=0 alerted=0
+2026-07-11 01:43:51,095 [INFO] apscheduler.executors.default: Job "_run_pipeline_job (trigger: interval[0:02:00], next run at: 2026-07-11 01:45:49 IST)" executed successfully

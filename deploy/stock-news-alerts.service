@@ -1,0 +1,20 @@
+[Unit]
+Description=stock-news-alerts scheduler (NSE filing alerts)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/stock-news-alerts
+# Recreate the venv ON THE VM (see DEPLOY.md) — do not copy nenv/ from your laptop,
+# it is architecture-specific.
+ExecStart=/home/ubuntu/stock-news-alerts/nenv/bin/python scheduler.py
+Restart=always
+RestartSec=15
+# Keep logs in journald (view: journalctl -u stock-news-alerts -f)
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

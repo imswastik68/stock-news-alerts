@@ -1,0 +1,22 @@
+# Static confidence lookup table by event type.
+#
+# IMPORTANT: this is a starting heuristic, not a statistically validated model.
+# The rates below are subjective priors ("how often does this event type tend to
+# move the stock in the predicted direction") and have not been backtested against
+# actual price outcomes. Treat alerts as a filtered starting point for your own
+# research — not a signal to act on directly. See src/scoring/confidence.py for the
+# documented extension point for a future backtested provider.
+base_rates:
+  ma_deal: 0.90
+  earnings_surprise: 0.68
+  guidance_change: 0.65
+  regulatory_legal: 0.60
+  analyst_rating: 0.55
+  insider_activity: 0.55
+  partnership_contract: 0.55
+  macro_sector: 0.50
+  other: 0.40
+
+# Alerts fire when final confidence >= this threshold. Can be overridden by
+# ALERT_CONFIDENCE_THRESHOLD in .env (env takes precedence if set).
+alert_threshold: 0.70

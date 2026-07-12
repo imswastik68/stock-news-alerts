@@ -1,0 +1,41 @@
+# Watchlist of NSE/BSE tickers to monitor.
+# - ticker: exchange-suffixed symbol (e.g. RELIANCE.NS). Stored on Article rows,
+#   shown in alerts, and used (minus the .NS) as the NSE announcements symbol.
+# - name: company name — the search query for Google News / NewsAPI, and the
+#   string matched against Economic Times / Moneycontrol RSS items.
+# - bse_code: optional numeric BSE scrip code, enables BSE corporate announcements.
+#
+# Per-source behavior (see README "News sources"):
+#   NSE/BSE announcements fire ONLY when the company actually files something.
+#   Google News / RSS give day-to-day media coverage. On a quiet day for a given
+#   stock, it's normal to get no alerts — that's the point (no material news).
+- ticker: RELIANCE.NS
+  name: "Reliance Industries"
+  bse_code: "500325"
+- ticker: TCS.NS
+  name: "Tata Consultancy Services"
+  bse_code: "532540"
+- ticker: INFY.NS
+  name: "Infosys"
+  bse_code: "500209"
+- ticker: HDFCBANK.NS
+  name: "HDFC Bank"
+  bse_code: "500180"
+- ticker: ICICIBANK.NS
+  name: "ICICI Bank"
+  bse_code: "532174"
+- ticker: SBIN.NS
+  name: "State Bank of India"
+  bse_code: "500112"
+- ticker: TATAMOTORS.NS
+  name: "Tata Motors"
+  bse_code: "500570"
+- ticker: BHARTIARTL.NS
+  name: "Bharti Airtel"
+  bse_code: "532454"
+- ticker: LT.NS
+  name: "Larsen & Toubro"
+  bse_code: "500510"
+- ticker: ADANIENT.NS
+  name: "Adani Enterprises"
+  bse_code: "512599"

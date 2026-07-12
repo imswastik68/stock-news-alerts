@@ -1,0 +1,10 @@
+.env
+*.db
+__pycache__/
+*.pyc
+venv/
+.venv/
+nenv/
+.pytest_cache/
+tg_session.session
+telegram_history.json
