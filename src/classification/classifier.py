@@ -2,15 +2,14 @@
 LLM classification: event type, predicted direction, reasoning, and any
 quantifiable detail (e.g. EPS beat %) for a single news article.
 
-Backend selection mirrors stock_selector's src/agent.py: the `openai` SDK
-pointed at Groq's OpenAI-compatible endpoint (free tier, llama-3.3-70b-versatile)
-as the primary backend, with local Ollama (qwen3:8b, also OpenAI-compatible) as
-an optional fallback. INFERENCE_BACKEND in .env picks which one is tried first;
-the other is tried if the first raises.
+Three free `openai`-SDK-compatible backends, tried in order (see
+_caller_chain): Gemini (frontier-class, generous free quota — the default
+primary), Groq (fast, but a tight tokens-per-minute ceiling), and local Ollama
+(fully offline fallback). INFERENCE_BACKEND in .env can reorder which leads.
 
-Local/free models are less reliable at strict JSON than hosted frontier APIs, so
-responses are validated with pydantic and, on a parse failure, retried once with
-a stricter "JSON only" follow-up. If that also fails, the article is treated as
+Free models vary in how reliably they follow strict JSON, so responses are
+validated with pydantic and, on a parse failure, retried once with a stricter
+"JSON only" follow-up. If that also fails, the article is treated as
 classification_failed by the caller (pipeline.py) — never crashes the pipeline.
 """
 
@@ -32,6 +31,16 @@ logger = logging.getLogger(__name__)
 _GROQ_BASE = "https://api.groq.com/openai/v1"
 _GROQ_MODEL = "llama-3.3-70b-versatile"
 
+# Gemini free tier via its OpenAI-compatible endpoint: frontier-class accuracy at
+# zero cost (free tier: ~10 req/min, 250K tokens/min, 1,500 req/day — far above
+# Groq's 12K TPM that otherwise forces a tight per-cycle article cap). Primary
+# backend whenever GEMINI_API_KEY is set; Groq then Ollama remain as fallbacks.
+_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
+_GEMINI_MODEL = "gemini-3.5-flash"
+# response_format isn't documented for Gemini's OpenAI-compat layer, so (like
+# Ollama) it relies on the strict prompt + the existing parse-retry-once logic
+# rather than a JSON-mode kwarg that might be silently ignored or rejected.
+
 # Output is a small JSON object (~80 tokens); 200 is plenty of headroom. Kept low
 # because Groq's free tier caps tokens-per-minute (input+output), and a smaller
 # per-call token cost = more articles classified before hitting that ceiling.
@@ -42,10 +51,17 @@ _RATE_LIMIT_CALLS = 20
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
 _call_timestamps: list[float] = []
 
+# Gemini free-tier RPM (~10/min): space calls at least this far apart so a full
+# cycle's worth of classifications never trips a 429. Simple min-interval
+# throttle rather than a sliding window — Gemini's quota resets fast enough
+# that "one call every ~7s" alone keeps us comfortably under.
+_GEMINI_MIN_INTERVAL_SECONDS = 6.5
+_last_gemini_call_at = 0.0
+
 # Logged at most once per pipeline cycle — reset via reset_cycle_state().
 _logged_unreachable_this_cycle = False
-_logged_rate_limited_this_cycle = False
-_rate_limited_this_cycle = False
+_logged_rate_limited_this_cycle: set[str] = set()
+_rate_limited_backends: set[str] = set()
 
 _SYSTEM_PROMPT = """You read an Indian-stock exchange filing (or news item) and classify it. The text may be extracted from a filing PDF, so ignore letterhead/addresses/boilerplate and focus on the substance. Return ONLY a JSON object, no other text.
 
@@ -67,26 +83,34 @@ _STRICT_SUFFIX = (
 
 
 def reset_cycle_state() -> None:
-    """Call at the start of each pipeline cycle so backend-unreachable warnings
-    are logged at most once per cycle instead of once per article."""
-    global _logged_unreachable_this_cycle, _logged_rate_limited_this_cycle, _rate_limited_this_cycle
+    """Call at the start of each pipeline cycle so backend-unreachable/rate-limit
+    warnings are logged at most once per cycle instead of once per article."""
+    global _logged_unreachable_this_cycle, _logged_rate_limited_this_cycle, _rate_limited_backends
     _logged_unreachable_this_cycle = False
-    _logged_rate_limited_this_cycle = False
-    _rate_limited_this_cycle = False
+    _logged_rate_limited_this_cycle = set()
+    _rate_limited_backends = set()
 
 
 def is_rate_limited() -> bool:
-    return _rate_limited_this_cycle
+    """True only when EVERY configured cloud backend is rate-limited this cycle
+    (Ollama, local and fail-fast, isn't counted — trying it costs nothing)."""
+    settings = get_settings()
+    cloud_backends = [
+        name
+        for name, key in (("gemini", settings.gemini_api_key), ("groq", settings.groq_api_key))
+        if key
+    ]
+    if not cloud_backends:
+        return False
+    return all(name in _rate_limited_backends for name in cloud_backends)
 
 
-def _mark_rate_limited() -> None:
-    global _logged_rate_limited_this_cycle, _rate_limited_this_cycle
-    _rate_limited_this_cycle = True
-    if not _logged_rate_limited_this_cycle:
-        logger.warning(
-            "classifier: Groq rate limit reached; stopping new LLM classifications for this cycle"
-        )
-        _logged_rate_limited_this_cycle = True
+def _mark_rate_limited(name: str) -> None:
+    global _logged_rate_limited_this_cycle
+    _rate_limited_backends.add(name)
+    if name not in _logged_rate_limited_this_cycle:
+        logger.warning("classifier: %s rate limit reached this cycle", name)
+        _logged_rate_limited_this_cycle.add(name)
 
 
 def _throttle_groq() -> bool:
@@ -94,10 +118,22 @@ def _throttle_groq() -> bool:
     global _call_timestamps
     _call_timestamps = [t for t in _call_timestamps if now - t < _RATE_LIMIT_WINDOW_SECONDS]
     if len(_call_timestamps) >= _RATE_LIMIT_CALLS:
-        _mark_rate_limited()
+        _mark_rate_limited("groq")
         return False
     _call_timestamps.append(time.monotonic())
     return True
+
+
+def _throttle_gemini() -> None:
+    """Sleep just enough to keep calls spaced under the free-tier RPM. Unlike
+    Groq's reject-and-skip, this blocks briefly — Gemini's per-call cost in
+    wait time is small and the quota resets fast, so waiting beats skipping."""
+    global _last_gemini_call_at
+    now = time.monotonic()
+    wait = _GEMINI_MIN_INTERVAL_SECONDS - (now - _last_gemini_call_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_gemini_call_at = time.monotonic()
 
 
 def _build_user_message(article: RawArticle) -> str:
@@ -145,9 +181,11 @@ def _call_backend(name: str, base_url: str, model: str, api_key: str, messages: 
         if name == "groq":
             if not _throttle_groq():
                 return None
+        elif name == "gemini":
+            _throttle_gemini()
         # max_retries=0: the SDK's own exponential-backoff retries would stack
-        # with our retry-once-on-parse-failure logic and the Groq rate
-        # throttle below, turning a single invalid key or down backend into a
+        # with our retry-once-on-parse-failure logic and the rate throttles
+        # above, turning a single invalid key or down backend into a
         # multi-minute hang. timeout keeps a genuinely hung connection (e.g.
         # Ollama installed but wedged) from blocking the whole cycle.
         client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=30.0)
@@ -165,10 +203,26 @@ def _call_backend(name: str, base_url: str, model: str, api_key: str, messages: 
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
         if status_code == 429:
-            _mark_rate_limited()
+            _mark_rate_limited(name)
             return None
         logger.debug("classifier: %s backend call failed: %s", name, exc)
         return None
+
+
+def _caller_chain(settings) -> list[tuple[str, str, str, str]]:
+    """Ordered (name, base_url, model, api_key) backends to try. Gemini leads
+    when configured — frontier-class accuracy, generous free quota, no Groq-style
+    TPM ceiling. INFERENCE_BACKEND=ollama still forces Ollama first (e.g. for a
+    fully offline setup)."""
+    gemini = ("gemini", _GEMINI_BASE, _GEMINI_MODEL, settings.gemini_api_key)
+    groq = ("groq", _GROQ_BASE, _GROQ_MODEL, settings.groq_api_key)
+    ollama = ("ollama", settings.ollama_url, settings.ollama_model, "ollama")
+
+    if settings.inference_backend == "ollama":
+        return [ollama, gemini, groq]
+    if settings.inference_backend == "groq":
+        return [groq, gemini, ollama]
+    return [gemini, groq, ollama]
 
 
 def _call_llm(system_prompt: str, user_msg: str) -> str | None:
@@ -178,18 +232,10 @@ def _call_llm(system_prompt: str, user_msg: str) -> str | None:
         {"role": "user", "content": user_msg},
     ]
 
-    groq_caller = ("groq", _GROQ_BASE, _GROQ_MODEL, settings.groq_api_key)
-    ollama_caller = ("ollama", settings.ollama_url, settings.ollama_model, "ollama")
-
-    if settings.inference_backend == "ollama":
-        callers = [ollama_caller, groq_caller]
-    else:
-        callers = [groq_caller, ollama_caller]
-
-    for name, base_url, model, api_key in callers:
-        if _rate_limited_this_cycle and name == "groq":
+    for name, base_url, model, api_key in _caller_chain(settings):
+        if name in _rate_limited_backends:
             continue
-        if name == "groq" and not api_key:
+        if name in ("gemini", "groq") and not api_key:
             continue
         raw = _call_backend(name, base_url, model, api_key, messages)
         if raw is not None:
@@ -198,8 +244,8 @@ def _call_llm(system_prompt: str, user_msg: str) -> str | None:
     global _logged_unreachable_this_cycle
     if not _logged_unreachable_this_cycle:
         logger.error(
-            "classifier: no LLM backend reachable (Groq key missing/failed and "
-            "Ollama not running?) — skipping classification for this cycle"
+            "classifier: no LLM backend reachable (Gemini/Groq keys missing/failed "
+            "and Ollama not running?) — skipping classification for this cycle"
         )
         _logged_unreachable_this_cycle = True
     return None

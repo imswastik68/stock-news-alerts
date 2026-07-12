@@ -26,6 +26,7 @@ def _bool_env(name: str, default: bool) -> bool:
 class Settings:
     # LLM backend
     inference_backend: str
+    gemini_api_key: str
     groq_api_key: str
     ollama_url: str
     ollama_model: str
@@ -78,7 +79,8 @@ def get_settings() -> Settings:
     threshold = float(env_threshold) if env_threshold else yaml_threshold
 
     _settings = Settings(
-        inference_backend=os.environ.get("INFERENCE_BACKEND", "groq").lower(),
+        inference_backend=os.environ.get("INFERENCE_BACKEND", "gemini").lower(),
+        gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
         groq_api_key=os.environ.get("GROQ_API_KEY", ""),
         ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434/v1"),
         ollama_model=os.environ.get("OLLAMA_MODEL", "qwen3:8b"),

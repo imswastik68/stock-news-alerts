@@ -21,6 +21,7 @@ VALID_JSON = (
 def _fake_settings():
     return types.SimpleNamespace(
         inference_backend="ollama",
+        gemini_api_key="",
         groq_api_key="",
         ollama_url="http://localhost:11434/v1",
         ollama_model="qwen3:8b",
@@ -150,3 +151,54 @@ def test_backend_unreachable_returns_none_without_retry():
     # made once the backend itself is unreachable, since there's no raw
     # output to retry parsing.
     assert mock_call.call_count == 1
+
+
+def _settings(inference_backend="gemini", gemini_key="g-key", groq_key="q-key"):
+    return types.SimpleNamespace(
+        inference_backend=inference_backend,
+        gemini_api_key=gemini_key,
+        groq_api_key=groq_key,
+        ollama_url="http://localhost:11434/v1",
+        ollama_model="qwen3:8b",
+    )
+
+
+def test_caller_chain_default_prefers_gemini():
+    names = [c[0] for c in classifier._caller_chain(_settings(inference_backend="gemini"))]
+    assert names == ["gemini", "groq", "ollama"]
+
+
+def test_caller_chain_groq_backend_forces_groq_first():
+    names = [c[0] for c in classifier._caller_chain(_settings(inference_backend="groq"))]
+    assert names == ["groq", "gemini", "ollama"]
+
+
+def test_caller_chain_ollama_backend_forces_ollama_first():
+    names = [c[0] for c in classifier._caller_chain(_settings(inference_backend="ollama"))]
+    assert names == ["ollama", "gemini", "groq"]
+
+
+def test_is_rate_limited_false_with_no_cloud_backends_configured():
+    classifier.reset_cycle_state()
+    with patch.object(classifier, "get_settings", lambda: _settings(gemini_key="", groq_key="")):
+        assert classifier.is_rate_limited() is False
+
+
+def test_is_rate_limited_only_true_when_all_configured_cloud_backends_limited():
+    classifier.reset_cycle_state()
+    with patch.object(classifier, "get_settings", lambda: _settings()):
+        classifier._mark_rate_limited("gemini")
+        assert classifier.is_rate_limited() is False  # groq still untried
+        classifier._mark_rate_limited("groq")
+        assert classifier.is_rate_limited() is True
+    classifier.reset_cycle_state()
+
+
+def test_reset_cycle_state_clears_rate_limit_tracking():
+    classifier.reset_cycle_state()
+    with patch.object(classifier, "get_settings", lambda: _settings()):
+        classifier._mark_rate_limited("gemini")
+        classifier._mark_rate_limited("groq")
+        assert classifier.is_rate_limited() is True
+        classifier.reset_cycle_state()
+        assert classifier.is_rate_limited() is False

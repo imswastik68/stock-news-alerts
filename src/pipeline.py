@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from src.classification.classifier import classify, is_rate_limited, reset_cycle_state
 from src.config import configure_logging, get_settings
 from src.ingestion.common import RawArticle
+from src.ingestion.exchange_rss import fetch_bse_rss, fetch_nse_rss
 from src.ingestion.nse_announcements import fetch_nse_market_wide
 from src.ingestion.pdf_extract import extract_pdf_text
 from src.scoring.confidence import BacktestedConfidenceProvider
@@ -85,13 +86,40 @@ def _filter_recent_articles(articles: list[RawArticle], max_age_hours: int) -> l
     return recent
 
 
+def _dedup_by_url(articles: list[RawArticle]) -> list[RawArticle]:
+    """Keep the first occurrence of each URL. The NSE date-range API and the NSE
+    RSS feed can both surface the same brand-new filing (same PDF URL); the API
+    item (correct symbol, structured category) is added first, so it wins."""
+    seen: set[str] = set()
+    deduped: list[RawArticle] = []
+    for a in articles:
+        if a.url in seen:
+            continue
+        seen.add(a.url)
+        deduped.append(a)
+    return deduped
+
+
 def _gather_articles(settings) -> list[RawArticle]:
-    """The exchange-filing backbone: every company's NSE filing, market-wide."""
+    """The exchange-filing backbone: NSE (date-range API depth + RSS freshness)
+    and BSE (RSS — BSE's JSON API blocks scripted access), market-wide."""
     articles: list[RawArticle] = []
     try:
         articles.extend(fetch_nse_market_wide())
     except Exception as exc:
         logger.error("pipeline: nse_market_wide fetch crashed: %s", exc)
+
+    try:
+        articles.extend(fetch_nse_rss())
+    except Exception as exc:
+        logger.error("pipeline: nse_rss fetch crashed: %s", exc)
+
+    try:
+        articles.extend(fetch_bse_rss())
+    except Exception as exc:
+        logger.error("pipeline: bse_rss fetch crashed: %s", exc)
+
+    articles = _dedup_by_url(articles)
 
     # Hard-drop always-procedural categories BEFORE the per-cycle cap, so the
     # limited classification budget goes to potentially-material filings, not

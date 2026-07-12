@@ -11,6 +11,7 @@ from src.classification.schema import ClassificationResult
 
 SOURCE_QUALITY = {
     "nse_announcements": 1.0,
+    "bse_rss": 1.0,
 }
 
 
