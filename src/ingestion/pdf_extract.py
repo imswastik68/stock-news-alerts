@@ -12,18 +12,24 @@ from __future__ import annotations
 
 import io
 import logging
+from urllib.parse import urlsplit
 
 import requests
 
 logger = logging.getLogger(__name__)
 
-_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Referer": "https://www.nseindia.com/",
-}
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+)
+
+
+def _headers_for(url: str) -> dict:
+    # Referer set to the file's own origin so both NSE and BSE archive hosts
+    # accept the request.
+    parts = urlsplit(url)
+    origin = f"{parts.scheme}://{parts.netloc}/" if parts.netloc else ""
+    return {"User-Agent": _USER_AGENT, "Referer": origin}
 
 _MAX_PDF_BYTES = 15 * 1024 * 1024  # skip anything larger — avoids slow downloads
 _MAX_PAGES = 3                     # first pages carry the material content
@@ -34,7 +40,7 @@ _TIMEOUT = 20
 def _download(url: str, session: requests.Session | None) -> bytes | None:
     getter = session.get if session is not None else requests.get
     try:
-        resp = getter(url, headers=_HEADERS, timeout=_TIMEOUT, stream=True)
+        resp = getter(url, headers=_headers_for(url), timeout=_TIMEOUT, stream=True)
         resp.raise_for_status()
         chunks = bytearray()
         for chunk in resp.iter_content(64 * 1024):

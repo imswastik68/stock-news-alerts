@@ -68,6 +68,9 @@ class Settings:
 
     # Loaded from yaml
     watchlist: list[WatchlistEntry] = field(default_factory=list)
+    # BSE-exclusive scrips to also poll in market_wide mode (NSE feed misses
+    # BSE-only stocks). Each is a WatchlistEntry with bse_code set.
+    bse_watchlist: list[WatchlistEntry] = field(default_factory=list)
     confidence_base_rates: dict[str, float] = field(default_factory=dict)
 
 
@@ -87,6 +90,29 @@ def _load_watchlist() -> list[WatchlistEntry]:
         )
         for e in raw
     ]
+
+
+def _load_bse_watchlist() -> list[WatchlistEntry]:
+    """BSE-exclusive scrips to poll in market_wide mode. Optional file; each entry
+    is `- code: "543299"  ticker: "RAPPID.BO"  name: "Rappid Valves"`."""
+    path = ROOT_DIR / "bse_watchlist.yaml"
+    if not path.exists():
+        return []
+    with open(path) as f:
+        raw = yaml.safe_load(f) or []
+    entries = []
+    for e in raw:
+        code = e.get("code") or e.get("bse_code")
+        if not code:
+            continue
+        entries.append(
+            WatchlistEntry(
+                ticker=e.get("ticker") or f"{code}.BO",
+                name=e.get("name") or str(code),
+                bse_code=str(code),
+            )
+        )
+    return entries
 
 
 def _load_confidence_table() -> tuple[dict[str, float], float]:
@@ -135,6 +161,7 @@ def get_settings() -> Settings:
         dry_run=_bool_env("DRY_RUN", False),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         watchlist=_load_watchlist(),
+        bse_watchlist=_load_bse_watchlist(),
         confidence_base_rates=base_rates,
     )
     return _settings

@@ -113,6 +113,15 @@ def _gather_market_wide(settings) -> list[RawArticle]:
     except Exception as exc:
         logger.error("pipeline: nse_market_wide fetch crashed: %s", exc)
 
+    # BSE-exclusive scrips (NSE market-wide misses BSE-only stocks). Add only
+    # BSE-EXCLUSIVE names to bse_watchlist.yaml — dual-listed ones are already in
+    # the NSE feed and would double-alert.
+    if settings.bse_watchlist:
+        try:
+            articles.extend(fetch_bse_announcements(settings.bse_watchlist, hours_back=36))
+        except Exception as exc:
+            logger.error("pipeline: bse_announcements fetch crashed: %s", exc)
+
     # Hard-drop always-procedural categories BEFORE the per-cycle cap, so the
     # limited classification budget goes to potentially-material filings, not
     # trading-window notices and compliance certificates.

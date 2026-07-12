@@ -72,6 +72,14 @@ def fetch_bse_announcements(watchlist: list[WatchlistEntry], hours_back: int = 2
     to_date = now_ist.strftime("%Y%m%d")
     articles: list[RawArticle] = []
 
+    session = requests.Session()
+    session.headers.update(_HEADERS)
+    try:
+        session.get("https://www.bseindia.com/", timeout=15)
+    except Exception:
+        pass  # cookie warm-up is best-effort
+
+    cutoff = now_ist - timedelta(hours=hours_back)
     for scrip_code, entry in code_to_entry.items():
         params = {
             "strCat": "-1",
@@ -82,7 +90,7 @@ def fetch_bse_announcements(watchlist: list[WatchlistEntry], hours_back: int = 2
             "strType": "C",
         }
         try:
-            resp = requests.get(_BSE_URL, headers=_HEADERS, params=params, timeout=15)
+            resp = session.get(_BSE_URL, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
         except Exception as exc:
@@ -91,10 +99,8 @@ def fetch_bse_announcements(watchlist: list[WatchlistEntry], hours_back: int = 2
 
         rows = _extract_rows(data)
         if not rows:
-            logger.info("bse_announcements: no rows for %s", entry.ticker)
             continue
 
-        cutoff = now_ist - timedelta(hours=hours_back)
         for item in rows:
             published_at = _parse_bse_dt(str(item.get("DT_TM") or ""))
             if published_at is None or published_at < cutoff:
@@ -104,14 +110,19 @@ def fetch_bse_announcements(watchlist: list[WatchlistEntry], hours_back: int = 2
             if not headline:
                 continue
 
+            category = str(item.get("CATEGORYNAME") or item.get("SUBCATNAME") or "").strip()
+            attach = _attachment_url(item, scrip_code, published_at)
+            has_pdf = str(item.get("ATTACHMENTNAME") or "").strip() != ""
             articles.append(
                 RawArticle(
                     ticker=entry.ticker,
                     headline=headline,
-                    summary=str(item.get("MORE") or item.get("CATEGORYNAME") or "").strip(),
-                    url=_attachment_url(item, scrip_code, published_at),
+                    summary=str(item.get("MORE") or category).strip(),
+                    url=attach,
                     source="bse_announcements",
                     published_at=published_at.astimezone(timezone.utc),
+                    category=category,
+                    attachment_url=attach if has_pdf else "",
                 )
             )
 

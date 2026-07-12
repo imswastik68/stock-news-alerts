@@ -1,0 +1,25 @@
+# BSE-EXCLUSIVE scrips to monitor in market_wide mode.
+#
+# ⚠️ CURRENT STATUS: BSE's announcement API refuses automated access from this
+# setup — it returns "No Record Found" for every scrip (even Reliance). Unlike
+# NSE, BSE actively blocks scripted access. So this feature is WIRED but dormant;
+# it will start working automatically if/when BSE access is restored or you run
+# from an environment BSE accepts. Until then, coverage is NSE-only.
+#
+# Why this exists: the NSE market-wide feed already covers every NSE-listed stock.
+# BSE has no free market-wide feed, so BSE-only stocks — small/SME names not on
+# the NSE — can only be reached by querying their specific BSE scrip code here.
+#
+# IMPORTANT: only add BSE-EXCLUSIVE stocks. A dual-listed stock (on both NSE and
+# BSE, e.g. Reliance/TCS) is already in the NSE feed — adding it here would make
+# the same filing alert twice.
+#
+# How to find a scrip code: open the stock on bseindia.com; the 6-digit number in
+# the URL (…/stock-share-price/<name>/<symbol>/<CODE>/) is the scrip code.
+#
+# Format (uncomment and edit):
+# - code: "543299"        # 6-digit BSE scrip code
+#   ticker: "RAPPID.BO"   # how it appears in your alerts (.BO = BSE)
+#   name: "Rappid Valves" # company name (shown in logs)
+
+# (empty by default — add your BSE-exclusive scrips above)
