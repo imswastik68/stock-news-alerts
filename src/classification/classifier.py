@@ -188,10 +188,16 @@ def _call_backend(name: str, base_url: str, model: str, api_key: str, messages: 
         # above, turning a single invalid key or down backend into a
         # multi-minute hang. timeout keeps a genuinely hung connection (e.g.
         # Ollama installed but wedged) from blocking the whole cycle.
-        client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=30.0)
+        client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=45.0)
         kwargs = {}
         if name == "groq":
             kwargs["response_format"] = {"type": "json_object"}
+        elif name == "gemini":
+            # gemini-3.5-flash is a thinking model and its reasoning tokens count
+            # against max_tokens — without this the 200-token budget is consumed
+            # by thoughts and the JSON comes back truncated (verified live: bare
+            # "{"). Classification needs no chain-of-thought; disable it.
+            kwargs["reasoning_effort"] = "none"
         resp = client.chat.completions.create(
             model=model,
             max_tokens=_MAX_TOKENS,
