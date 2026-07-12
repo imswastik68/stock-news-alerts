@@ -73,6 +73,10 @@ class Settings:
 
 def _load_watchlist() -> list[WatchlistEntry]:
     path = ROOT_DIR / "watchlist.yaml"
+    # Optional: market_wide mode ignores the watchlist, and the file is gitignored
+    # (not present on a fresh clone / CI checkout). Absent = empty watchlist.
+    if not path.exists():
+        return []
     with open(path) as f:
         raw = yaml.safe_load(f) or []
     return [
