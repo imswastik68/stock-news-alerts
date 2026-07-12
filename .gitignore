@@ -8,3 +8,4 @@ nenv/
 .pytest_cache/
 tg_session.session
 telegram_history.json
+README.md
