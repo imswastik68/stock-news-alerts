@@ -49,7 +49,10 @@ def _mock_response(xml: str) -> Mock:
 
 
 def test_bse_rss_parses_scrip_ticker_and_filters_stale():
-    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)):
+    # BSE-only listing (not resolvable to an NSE ticker) — falls back to the
+    # numeric scrip code, as before the symbol-resolution wiring was added.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)), \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None):
         articles = exchange_rss.fetch_bse_rss(hours_back=36)
 
     assert len(articles) == 1  # the 100h-old item is dropped
@@ -60,13 +63,28 @@ def test_bse_rss_parses_scrip_ticker_and_filters_stale():
     assert a.attachment_url.endswith(".pdf")
 
 
+def test_bse_rss_dual_listed_company_resolves_to_nse_ticker():
+    # Many BSE-only scrip codes have zero Yahoo Finance price data; a company
+    # also listed on NSE should use its (priceable) NSE ticker instead.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)), \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value="AWHCL") as mock_resolve:
+        articles = exchange_rss.fetch_bse_rss(hours_back=36)
+
+    assert len(articles) == 1
+    assert articles[0].ticker == "AWHCL.NS"
+    mock_resolve.assert_called_once_with("Antony Waste Handling Cell Ltd")
+
+
 def test_bse_rss_fetch_failure_returns_empty_list():
     with patch("src.ingestion.exchange_rss.requests.get", side_effect=ConnectionError("down")):
         assert exchange_rss.fetch_bse_rss() == []
 
 
 def test_nse_rss_extracts_category_from_subject_and_ticker_from_filename():
-    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)):
+    # Filename prefix "RELIANCE" is validated against the real symbol list, not
+    # just guessed — must be confirmed valid before being used as the ticker.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)), \
+         patch("src.ingestion.exchange_rss.is_valid_nse_symbol", return_value=True):
         articles = exchange_rss.fetch_nse_rss(hours_back=36)
 
     assert len(articles) == 1
@@ -75,6 +93,32 @@ def test_nse_rss_extracts_category_from_subject_and_ticker_from_filename():
     assert a.source == "nse_announcements"  # same source class as the date-range API
     assert a.category == "Awarding of order(s)/contract(s)"
     assert "order win" in a.headline.lower()
+
+
+def test_nse_rss_invalid_filename_prefix_falls_back_to_company_name_resolution():
+    # "RELIANCE" from the filename fails validation this time (e.g. a wrong
+    # prefix like "AWHCLP") — must fall back to resolving the title (company
+    # name) against the symbol master instead of trusting the filename guess.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)), \
+         patch("src.ingestion.exchange_rss.is_valid_nse_symbol", return_value=False), \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value="RELIANCE") as mock_resolve:
+        articles = exchange_rss.fetch_nse_rss(hours_back=36)
+
+    assert len(articles) == 1
+    assert articles[0].ticker == "RELIANCE.NS"
+    mock_resolve.assert_called_once_with("Reliance Industries Limited")
+
+
+def test_nse_rss_unresolvable_ticker_keeps_company_name():
+    # Neither the filename prefix nor the company-name lookup resolves — the
+    # alert must still go out (unpriced) rather than being dropped.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)), \
+         patch("src.ingestion.exchange_rss.is_valid_nse_symbol", return_value=False), \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None):
+        articles = exchange_rss.fetch_nse_rss(hours_back=36)
+
+    assert len(articles) == 1
+    assert articles[0].ticker == "Reliance Industries Limited"
 
 
 def test_nse_rss_fetch_failure_returns_empty_list():

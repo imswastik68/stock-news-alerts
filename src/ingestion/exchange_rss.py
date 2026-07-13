@@ -24,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from src.ingestion.common import RawArticle
+from src.ingestion.symbol_master import is_valid_nse_symbol, resolve_nse_symbol
 
 logger = logging.getLogger(__name__)
 
@@ -62,8 +63,11 @@ def _fetch_items(url: str) -> list:
 
 
 def fetch_bse_rss(hours_back: int = 36) -> list[RawArticle]:
-    """Market-wide BSE announcements. Ticker is '<scripcode>.BO' (yfinance
-    accepts numeric .BO codes, so price context still works)."""
+    """Market-wide BSE announcements. Dual-listed companies (also on NSE) use
+    their NSE ticker instead of the BSE scrip — many BSE-only scrip codes have
+    zero Yahoo Finance price data, which silently breaks price context and
+    outcome tracking for them; the NSE ticker prices fine. BSE-only listings
+    keep the numeric '<scripcode>.BO' form (yfinance accepts it)."""
     try:
         items = _fetch_items(_BSE_RSS)
     except Exception as exc:
@@ -84,9 +88,13 @@ def fetch_bse_rss(hours_back: int = 36) -> list[RawArticle]:
             m = re.search(r"\((\d{6})\)", title)
             scrip = m.group(1) if m else ""
         company = re.sub(r"\s*\(\d{6}\)\s*$", "", title).strip()
+
+        nse_symbol = resolve_nse_symbol(company) if company else None
+        ticker = f"{nse_symbol}.NS" if nse_symbol else (f"{scrip}.BO" if scrip else (company or "BSE?"))
+
         articles.append(
             RawArticle(
-                ticker=f"{scrip}.BO" if scrip else (company or "BSE?"),
+                ticker=ticker,
                 headline=(desc or title)[:300],
                 summary=company,
                 url=link,
@@ -106,9 +114,14 @@ def fetch_bse_rss(hours_back: int = 36) -> list[RawArticle]:
 
 
 def fetch_nse_rss(hours_back: int = 36) -> list[RawArticle]:
-    """Freshest NSE filings from the official RSS. The ticker is best-effort
-    (derived from the PDF filename prefix); the date-range API remains the
-    authoritative NSE source — pipeline dedup by URL keeps them from clashing."""
+    """Freshest NSE filings from the official RSS. The RSS has no structured
+    symbol field, so the ticker is resolved in order: (1) the PDF-filename
+    prefix VALIDATED against the real NSE symbol list (not just guessed — the
+    prefix is sometimes wrong, e.g. 'AWHCLP' instead of 'AWHCL'), (2) a
+    company-name lookup against the same symbol master, (3) the company name
+    kept as-is (alert still goes out, just unpriced). The date-range API
+    remains the authoritative NSE source; pipeline dedup by URL keeps the two
+    from clashing when they see the same filing."""
     try:
         items = _fetch_items(_NSE_RSS)
     except Exception as exc:
@@ -131,11 +144,13 @@ def fetch_nse_rss(hours_back: int = 36) -> list[RawArticle]:
         if m:
             category = m.group(1).strip()[:120]
 
-        # PDF filename prefix approximates the symbol (e.g. AWHCLP_... ~ AWHCL);
-        # imperfect, but API-fetched duplicates (proper symbol) win via dedup.
         fname = link.rsplit("/", 1)[-1]
         prefix = fname.split("_", 1)[0].upper()
-        ticker = f"{prefix}.NS" if prefix.isalpha() and 1 < len(prefix) <= 12 else (title or "NSE?")
+        if prefix.isalpha() and is_valid_nse_symbol(prefix):
+            ticker = f"{prefix}.NS"
+        else:
+            nse_symbol = resolve_nse_symbol(title) if title else None
+            ticker = f"{nse_symbol}.NS" if nse_symbol else (title or "NSE?")
 
         articles.append(
             RawArticle(
