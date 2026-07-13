@@ -21,6 +21,7 @@ from src.ingestion.exchange_rss import fetch_bse_rss, fetch_nse_rss
 from src.ingestion.nse_announcements import fetch_nse_market_wide
 from src.ingestion.pdf_extract import extract_pdf_text
 from src.scoring.confidence import BacktestedConfidenceProvider
+from src.scoring.dedup import is_duplicate_of_recent_alert
 from src.scoring.impact import DROP, HIGH, category_impact
 from src.scoring.market_data import get_quote
 from src.scoring.outcomes import track_outcomes
@@ -260,12 +261,30 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
         excluded_event_types=_EXCLUDED_FROM_ALERTS,
         impact_tier=impact_tier,
     ):
-        try:
-            if send_alert(article, quote=get_quote(article.ticker)):
-                mark_alert_sent(session, article.id)
-                outcome["alerted"] = True
-        except Exception as exc:
-            logger.error("pipeline: send_alert crashed for %r: %s", raw.headline[:80], exc)
+        # Same real-world event can surface as genuinely different filings — a
+        # dual-listed company disclosing to NSE and BSE separately, or an
+        # exchange re-filing minutes later with a correction. Confirmed live:
+        # this suppressed a real cross-exchange duplicate. Suppressed articles
+        # are still stored and marked sent (never retried), just not pushed.
+        if is_duplicate_of_recent_alert(
+            session,
+            headline=display_headline,
+            direction=result.direction,
+            window_hours=settings.dedup_window_hours,
+            threshold=settings.dedup_similarity_threshold,
+        ):
+            logger.info(
+                "pipeline: suppressing likely-duplicate alert for %s: %r",
+                raw.ticker, display_headline[:80],
+            )
+            mark_alert_sent(session, article.id)
+        else:
+            try:
+                if send_alert(article, quote=get_quote(article.ticker)):
+                    mark_alert_sent(session, article.id)
+                    outcome["alerted"] = True
+            except Exception as exc:
+                logger.error("pipeline: send_alert crashed for %r: %s", raw.headline[:80], exc)
 
     return outcome
 
@@ -282,6 +301,19 @@ def _send_pending_alerts(session, settings) -> int:
         min_published_at=datetime.now(timezone.utc) - timedelta(hours=settings.max_news_age_hours),
     )
     for article in pending:
+        if is_duplicate_of_recent_alert(
+            session,
+            headline=article.headline,
+            direction=article.direction,
+            window_hours=settings.dedup_window_hours,
+            threshold=settings.dedup_similarity_threshold,
+        ):
+            logger.info(
+                "pipeline: suppressing likely-duplicate pending alert for %s: %r",
+                article.ticker, article.headline[:80],
+            )
+            mark_alert_sent(session, article.id)
+            continue
         try:
             if send_alert(article, quote=get_quote(article.ticker)):
                 mark_alert_sent(session, article.id)

@@ -44,6 +44,8 @@ class Settings:
     min_source_quality_for_alerts: float
     max_articles_per_cycle: int
     max_news_age_hours: int
+    dedup_window_hours: float
+    dedup_similarity_threshold: float
     daily_summary_enabled: bool
     daily_summary_hour: int
 
@@ -94,6 +96,8 @@ def get_settings() -> Settings:
         min_source_quality_for_alerts=float(os.environ.get("MIN_SOURCE_QUALITY_FOR_ALERTS", "0.55")),
         max_articles_per_cycle=int(os.environ.get("MAX_ARTICLES_PER_CYCLE", "10")),
         max_news_age_hours=int(os.environ.get("MAX_NEWS_AGE_HOURS", "48")),
+        dedup_window_hours=float(os.environ.get("DEDUP_WINDOW_HOURS", "3.0")),
+        dedup_similarity_threshold=float(os.environ.get("DEDUP_SIMILARITY_THRESHOLD", "0.65")),
         daily_summary_enabled=_bool_env("DAILY_SUMMARY_ENABLED", True),
         daily_summary_hour=int(os.environ.get("DAILY_SUMMARY_HOUR", "18")),
         db_path=os.environ.get("DB_PATH", "stock_news.db"),
