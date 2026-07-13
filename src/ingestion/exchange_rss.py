@@ -24,7 +24,11 @@ from datetime import datetime, timedelta, timezone
 import requests
 
 from src.ingestion.common import RawArticle
-from src.ingestion.symbol_master import is_valid_nse_symbol, resolve_nse_symbol
+from src.ingestion.symbol_master import (
+    is_master_available,
+    is_valid_nse_symbol,
+    resolve_nse_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -146,11 +150,19 @@ def fetch_nse_rss(hours_back: int = 36) -> list[RawArticle]:
 
         fname = link.rsplit("/", 1)[-1]
         prefix = fname.split("_", 1)[0].upper()
-        if prefix.isalpha() and is_valid_nse_symbol(prefix):
+        prefix_plausible = prefix.isalpha() and 1 < len(prefix) <= 12
+        if prefix_plausible and is_valid_nse_symbol(prefix):
+            ticker = f"{prefix}.NS"
+        elif (nse_symbol := resolve_nse_symbol(title) if title else None):
+            ticker = f"{nse_symbol}.NS"
+        elif prefix_plausible and not is_master_available():
+            # Symbol master unreachable (NSE archives are flaky): every symbol
+            # would look "invalid", so validation is meaningless here. Keep the
+            # old prefix heuristic rather than downgrading a probably-good
+            # ticker to an unpriceable company name.
             ticker = f"{prefix}.NS"
         else:
-            nse_symbol = resolve_nse_symbol(title) if title else None
-            ticker = f"{nse_symbol}.NS" if nse_symbol else (title or "NSE?")
+            ticker = title or "NSE?"
 
         articles.append(
             RawArticle(

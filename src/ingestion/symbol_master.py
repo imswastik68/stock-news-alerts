@@ -148,3 +148,15 @@ def is_valid_nse_symbol(symbol: str) -> bool:
         return False
     _load_master()
     return bool(_valid_symbols) and symbol.strip().upper() in _valid_symbols
+
+
+def is_master_available() -> bool:
+    """False when the symbol list couldn't be loaded (network down, NSE archives
+    flaky — it timed out repeatedly in practice). Callers must NOT treat
+    is_valid_nse_symbol()==False as "bad symbol" in that case: with no master to
+    check against, *every* symbol looks invalid, which would silently downgrade
+    good tickers to unpriceable company names and break outcome tracking — the
+    exact failure this module exists to prevent. Fall back to the pre-existing
+    heuristic instead."""
+    _load_master()
+    return bool(_valid_symbols)

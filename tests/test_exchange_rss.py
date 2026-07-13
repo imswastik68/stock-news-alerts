@@ -109,12 +109,31 @@ def test_nse_rss_invalid_filename_prefix_falls_back_to_company_name_resolution()
     mock_resolve.assert_called_once_with("Reliance Industries Limited")
 
 
-def test_nse_rss_unresolvable_ticker_keeps_company_name():
-    # Neither the filename prefix nor the company-name lookup resolves — the
-    # alert must still go out (unpriced) rather than being dropped.
+def test_nse_rss_keeps_prefix_heuristic_when_symbol_master_unavailable():
+    # Regression: if the symbol master can't load (NSE archives are flaky and
+    # timed out repeatedly in practice), is_valid_nse_symbol() returns False for
+    # EVERY symbol. Naively treating that as "bad symbol" would downgrade a
+    # perfectly good RELIANCE.NS to the unpriceable string "Reliance Industries
+    # Limited" — breaking the outcome tracking this whole module exists to fix.
+    # With no master to validate against, keep the old prefix heuristic.
     with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)), \
          patch("src.ingestion.exchange_rss.is_valid_nse_symbol", return_value=False), \
-         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None):
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None), \
+         patch("src.ingestion.exchange_rss.is_master_available", return_value=False):
+        articles = exchange_rss.fetch_nse_rss(hours_back=36)
+
+    assert len(articles) == 1
+    assert articles[0].ticker == "RELIANCE.NS"  # NOT the company name
+
+
+def test_nse_rss_unresolvable_ticker_keeps_company_name():
+    # Master IS available (so validation is meaningful) but the company genuinely
+    # isn't main-board NSE-listed (e.g. an SME/Emerge listing) — the alert must
+    # still go out under its company name (unpriced) rather than being dropped.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_NSE_XML)), \
+         patch("src.ingestion.exchange_rss.is_valid_nse_symbol", return_value=False), \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None), \
+         patch("src.ingestion.exchange_rss.is_master_available", return_value=True):
         articles = exchange_rss.fetch_nse_rss(hours_back=36)
 
     assert len(articles) == 1
