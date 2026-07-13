@@ -25,6 +25,8 @@ import sys
 from datetime import timezone
 from pathlib import Path
 
+import requests
+
 try:
     from telethon import TelegramClient
 except ImportError:
@@ -43,6 +45,17 @@ def _bot_entity_id(telegram_token: str) -> int:
     return int(head)
 
 
+async def _resolve_bot(client: "TelegramClient", telegram_token: str, telegram_username: str | None):
+    """Telethon can't resolve an entity from a bare numeric id unless it's
+    already cached in this session (raises 'Could not find the input entity').
+    Resolving by @username works unconditionally via contacts.resolveUsername,
+    so prefer that; fall back to the numeric id (works once the bot has been
+    seen at least once through this session)."""
+    if telegram_username:
+        return await client.get_entity(telegram_username.lstrip("@"))
+    return await client.get_entity(_bot_entity_id(telegram_token))
+
+
 def _load_existing() -> list[dict]:
     if _HISTORY_OUT.exists():
         return json.loads(_HISTORY_OUT.read_text())
@@ -56,15 +69,27 @@ async def fetch() -> None:
     if not settings.telegram_token:
         sys.exit("TELEGRAM_TOKEN missing from .env — needed to identify the bot.")
 
-    bot_id = _bot_entity_id(settings.telegram_token)
     history = _load_existing()
     seen_ids = {m["id"] for m in history}
 
+    # Bot API getMe (no login needed) gives the @username, which Telethon can
+    # resolve reliably; the raw numeric id alone fails unless already cached in
+    # this session (see _resolve_bot).
+    username = None
+    try:
+        me = requests.get(
+            f"https://api.telegram.org/bot{settings.telegram_token}/getMe", timeout=15
+        ).json()
+        username = me.get("result", {}).get("username")
+    except Exception:
+        pass
+
     client = TelegramClient(str(_SESSION), settings.tg_api_id, settings.tg_api_hash)
     await client.start()
+    bot_entity = await _resolve_bot(client, settings.telegram_token, username)
 
     new_msgs: list[dict] = []
-    async for msg in client.iter_messages(bot_id, limit=None):
+    async for msg in client.iter_messages(bot_entity, limit=None):
         if not msg.text or msg.id in seen_ids:
             continue
         new_msgs.append(

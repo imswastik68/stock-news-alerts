@@ -30,6 +30,18 @@ def _event_type_label(event_type: str) -> str:
     return event_type.replace("_", " ").title()
 
 
+def _display_ticker(ticker: str) -> str:
+    """BSE tickers like '532933.BO' are indistinguishable from a domain name
+    ending in Bolivia's real '.bo' ccTLD — Telegram auto-linkifies them, which
+    splits our single bold title into two adjacent bold spans (renders as a
+    garbled '****' and turns the ticker into a stray clickable link). Display
+    BSE tickers without the dotted suffix; the real '.BO' ticker is still used
+    everywhere else (dedup, price lookups) — this only affects the alert text."""
+    if ticker.endswith(".BO"):
+        return f"{ticker[:-3]} (BSE)"
+    return ticker
+
+
 def _format_price_line(quote: dict | None) -> str | None:
     """Price + %move + liquidity context, so you can tell a real mover / liquid
     name from an illiquid micro-cap. Skipped if the quote couldn't be fetched."""
@@ -54,7 +66,7 @@ def _format_alert(article: Article, quote: dict | None = None) -> str:
     confidence_pct = round(article.confidence * 100)
 
     lines = [
-        f"{emoji} <b>{_e(article.ticker)} — {_e(event_label)} ({_e(direction_label)})</b>",
+        f"{emoji} <b>{_e(_display_ticker(article.ticker))} — {_e(event_label)} ({_e(direction_label)})</b>",
     ]
     # Show the official exchange category for filings — this is the "why it's
     # high-impact" signal, like the pro platforms' tags.
