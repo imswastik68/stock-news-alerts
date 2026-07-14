@@ -353,8 +353,17 @@ def run_pipeline() -> dict:
         # Measurement loop: fill in matured forward returns for past alerts, which
         # feed the calibrated confidence model above. Bounded so it never
         # dominates a cycle; fails soft (yfinance can be flaky).
+        #
+        # limit=60, not the original 15: a per-call yfinance fetch is fast
+        # (~0.1-0.4s, confirmed live), but the original limit=15 couldn't clear
+        # even a modest backlog. Confirmed live: a 27-row ret_1d backlog left
+        # perfectly-priceable large-caps (BEL.NS, HCLTECH.NS, CARRARO.NS)
+        # sitting unfilled for a day+ and misreported as "unpriceable" by
+        # evaluate.py's coverage stats — every one of them actually returns a
+        # real forward return when tested with its real timestamp. 60 clears
+        # a realistic backlog in one cycle (~6-24s) with headroom.
         try:
-            track_outcomes(session, limit=15)
+            track_outcomes(session, limit=60)
         except Exception as exc:
             logger.error("pipeline: outcome tracking crashed: %s", exc)
     finally:
