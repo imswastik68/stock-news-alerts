@@ -1,0 +1,44 @@
+name: evaluate-selftest
+
+# One-off, READ-ONLY diagnostic: restore the real production DB (same cache
+# key prefix the news-scan loop uses) and run evaluate.py against it, printing
+# the actual track record to the job log. Does NOT save the cache back, so it
+# can never mutate or race with the live news-scan loop.
+on:
+  workflow_dispatch: {}
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Restore production DB (read-only)
+        uses: actions/cache/restore@v4
+        with:
+          path: stock_news.db
+          key: news-db-nonexistent-key-forces-prefix-match
+          restore-keys: news-db-
+
+      - name: Run evaluate.py at all three horizons
+        run: |
+          if [ ! -f stock_news.db ]; then
+            echo "No cached DB found."
+            exit 0
+          fi
+          ls -la stock_news.db
+          echo "=== ret_1d ==="
+          python evaluate.py --horizon ret_1d
+          echo ""
+          echo "=== ret_3d ==="
+          python evaluate.py --horizon ret_3d
+          echo ""
+          echo "=== ret_5d ==="
+          python evaluate.py --horizon ret_5d
