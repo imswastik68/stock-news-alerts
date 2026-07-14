@@ -99,7 +99,8 @@ jobs:
                   print(f"{tk}: no NULL ret_1d rows found (already filled or none exist)")
                   continue
               for a in rows:
-                  age_days = (now - a.published_at).total_seconds() / 86400
+                  pub = a.published_at if a.published_at.tzinfo else a.published_at.replace(tzinfo=timezone.utc)
+                  age_days = (now - pub).total_seconds() / 86400
                   ret = get_forward_return(tk, a.published_at, 1)
                   print(f"{tk}: id={a.id} published_at={a.published_at} (age={age_days:.1f}d) -> get_forward_return={ret}")
           session.close()
