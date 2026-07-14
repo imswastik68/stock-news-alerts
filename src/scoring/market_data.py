@@ -20,13 +20,27 @@ from datetime import date, datetime, timedelta
 
 logger = logging.getLogger(__name__)
 
-# Per-process cache of daily-close Series, keyed by ticker — outcome tracking and
-# quotes hit the same tickers repeatedly within one run.
+# Per-process cache of daily-close Series, keyed by ticker only — outcome
+# tracking and quotes hit the same tickers repeatedly within one run.
+#
+# The window is a FIXED, generous size rather than the caller's requested
+# `days` (bug found + fixed 2026-07-14): track_outcomes() calls this with a
+# different `days` value per article depending on how old that article is, and
+# the same ticker often gets multiple alerts. A per-ticker cache keyed without
+# the window size meant a later call needing a LONGER lookback than an earlier
+# cached call would silently reuse the too-short series — get_forward_return's
+# `next(d >= from_date)` then matches the OLDEST available (wrong, too-recent)
+# date as the base price instead of failing, producing a plausible-looking but
+# WRONG forward return with no error. Confirmed by reproduction: a second call
+# needing a 40-day window silently got the cached 13-day series and returned a
+# fabricated number. Fetching one fixed window comfortably covering the whole
+# valid tracking range removes the hazard rather than trying to cache-key it.
+_CLOSES_LOOKBACK_DAYS = 60  # >> _MAX_TRACK_AGE_DAYS (20) + max horizon (5 trading days) + weekend/holiday padding
 _close_cache: dict[str, object] = {}
 
 
-def _closes(ticker: str, days: int = 30):
-    """Daily close Series for the last `days` calendar days, or None."""
+def _closes(ticker: str):
+    """Daily close Series for the last _CLOSES_LOOKBACK_DAYS calendar days, or None."""
     if ticker in _close_cache:
         return _close_cache[ticker]
     try:
@@ -34,7 +48,7 @@ def _closes(ticker: str, days: int = 30):
 
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            hist = yf.Ticker(ticker).history(period=f"{days}d")
+            hist = yf.Ticker(ticker).history(period=f"{_CLOSES_LOOKBACK_DAYS}d")
         closes = hist["Close"].dropna() if hist is not None and not hist.empty else None
     except Exception as exc:
         logger.debug("market_data: history failed for %s: %s", ticker, exc)
@@ -87,16 +101,21 @@ def get_quote(ticker: str) -> dict | None:
 
 def get_forward_return(ticker: str, from_dt: datetime | date, trading_days: int) -> float | None:
     """% return from the first close on/after `from_dt` to `trading_days` trading
-    bars later. None if the data isn't there yet (not matured) or fetch fails."""
+    bars later. None if the data isn't there yet (not matured), `from_dt` is
+    older than the cached window can cover, or the fetch fails."""
     from_date = from_dt.date() if isinstance(from_dt, datetime) else from_dt
-    # Need enough history to reach from_date and `trading_days` bars beyond it.
-    span_days = (date.today() - from_date).days + 5
-    closes = _closes(ticker, days=max(span_days, trading_days * 3 + 10))
+    closes = _closes(ticker)
     if closes is None or len(closes) == 0:
         return None
 
     # Index is tz-aware timestamps; compare on plain dates.
     dates = [ts.date() if hasattr(ts, "date") else ts for ts in closes.index]
+    if dates[0] > from_date:
+        # The fetched window doesn't reach back far enough to contain the true
+        # base date. Matching anyway would silently pick the OLDEST available
+        # (too-recent) date as "the" base price — exactly the bug that leaked a
+        # fabricated forward-return with no error. Fail explicitly instead.
+        return None
     base_idx = next((i for i, d in enumerate(dates) if d >= from_date), None)
     if base_idx is None:
         return None

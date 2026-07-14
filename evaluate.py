@@ -57,7 +57,15 @@ def _hit(direction, ret):
 def coverage_stats(session, horizon: str) -> dict:
     """Alerted articles old enough that `horizon` should have matured: how many
     actually got a measured outcome vs. stayed NULL (permanently unpriceable —
-    mostly BSE-only scrips with no Yahoo Finance data)."""
+    mostly BSE-only scrips with no Yahoo Finance data).
+
+    `measured` counts ROWS with a non-NULL value, not "total rows minus unique
+    missing tickers" — that set-difference shortcut undercounts missing rows
+    (and so overcounts "measured") whenever the same ticker has BOTH a measured
+    and an unmeasured alert, which happens constantly here (TATACAP.NS,
+    SOMANYCERA.NS, WELCORP.NS etc. each got 2-3 separate alerts). Reproduced:
+    2 unmeasured + 2 measured rows across 2 tickers reported "measured: 3"
+    instead of the correct 2."""
     col = getattr(Article, horizon)
     min_age_days = _MIN_AGE_DAYS.get(horizon, 3)
     cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
@@ -67,8 +75,9 @@ def coverage_stats(session, horizon: str) -> dict:
     )
     rows = list(session.execute(stmt))
     total = len(rows)
+    measured = sum(1 for _, ret in rows if ret is not None)
     missing_tickers = sorted({ticker for ticker, ret in rows if ret is None})
-    return {"total": total, "measured": total - len(missing_tickers), "missing_tickers": missing_tickers}
+    return {"total": total, "measured": measured, "missing_tickers": missing_tickers}
 
 
 def impact_stats(rets: list[float]) -> tuple[float, float]:
