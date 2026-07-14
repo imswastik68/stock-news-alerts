@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import math
 
 import telegram
 
@@ -42,19 +43,28 @@ def _display_ticker(ticker: str) -> str:
     return ticker
 
 
+def _is_usable_number(value) -> bool:
+    """True for a real, finite number. get_quote() filters NaN at the source
+    (confirmed live: an unfiltered NaN leaked "₹nan | ▼nan%" into a sent
+    alert), but this function takes `quote` as a plain dict from any caller —
+    checking here too means it can never leak NaN/inf regardless of who built
+    the dict, not just when the caller happens to be get_quote()."""
+    return value is not None and math.isfinite(value)
+
+
 def _format_price_line(quote: dict | None) -> str | None:
     """Price + %move + liquidity context, so you can tell a real mover / liquid
     name from an illiquid micro-cap. Skipped if the quote couldn't be fetched."""
-    if not quote or quote.get("price") is None:
+    if not quote or not _is_usable_number(quote.get("price")):
         return None
     price = quote["price"]
     pct = quote.get("pct_change")
     vol = quote.get("avg_volume")
     parts = [f"₹{price:,.2f}"]
-    if pct is not None:
+    if _is_usable_number(pct):
         arrow = "▲" if pct >= 0 else "▼"
         parts.append(f"{arrow}{abs(pct):.1f}%")
-    if vol:
+    if _is_usable_number(vol):
         parts.append(f"vol {vol/1e6:.1f}M" if vol >= 1e6 else f"vol {vol/1e3:.0f}K")
     return "💹 " + " | ".join(parts)
 

@@ -44,8 +44,17 @@ def _closes(ticker: str, days: int = 30):
 
 
 def get_quote(ticker: str) -> dict | None:
-    """Recent close, 1-day % change, and 5-day average volume. None on failure."""
+    """Recent close, 1-day % change, and 5-day average volume. None on failure.
+
+    yfinance can return a NaN Close/Volume for the most-recent bar early in the
+    trading session (the current-day row hasn't fully populated yet) — a plain
+    `is None` check doesn't catch this (NaN is a valid float, not None), and
+    NaN is also truthy in Python, so an unguarded `if vol:` would pass it
+    through too. Confirmed live: this leaked literal "₹nan | ▼nan%" into two
+    sent alerts. Every numeric field is NaN-checked before being returned."""
     try:
+        import math
+
         import yfinance as yf
 
         with warnings.catch_warnings():
@@ -54,11 +63,21 @@ def get_quote(ticker: str) -> dict | None:
         if hist is None or len(hist) < 2:
             return None
         close = float(hist["Close"].iloc[-1])
+        if math.isnan(close):
+            return None  # no usable price at all this call
+
         prev = float(hist["Close"].iloc[-2])
+        pct_change = (close / prev - 1) * 100 if prev and not math.isnan(prev) else None
+        if pct_change is not None and math.isnan(pct_change):
+            pct_change = None
+
         avg_vol = float(hist["Volume"].tail(5).mean())
+        if math.isnan(avg_vol):
+            avg_vol = None
+
         return {
             "price": close,
-            "pct_change": (close / prev - 1) * 100 if prev else None,
+            "pct_change": pct_change,
             "avg_volume": avg_vol,
         }
     except Exception as exc:

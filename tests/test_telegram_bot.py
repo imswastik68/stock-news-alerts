@@ -7,9 +7,10 @@ one, rendering as a garbled '****' and turning the ticker into a stray link)."""
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 
-from src.alerting.telegram_bot import _display_ticker, _format_alert
+from src.alerting.telegram_bot import _display_ticker, _format_alert, _format_price_line
 from src.storage.models import Article
 
 
@@ -52,3 +53,39 @@ def test_format_alert_nse_title_unaffected():
     text = _format_alert(_article("RELIANCE.NS"))
     title_line = text.splitlines()[0]
     assert "RELIANCE.NS" in title_line
+
+
+# ── NaN price-line guard ─────────────────────────────────────────────────────
+# Regression: yfinance can return NaN for the latest bar early in the trading
+# session. `is None` doesn't catch it (NaN is a valid float, not None) and NaN
+# is truthy in Python (`if vol:` would pass it through). Confirmed live: two
+# real alerts on 2026-07-14 read literal "₹nan | ▼nan%" in the price line.
+# get_quote() now filters NaN at the source (tests/test_market_data.py), but
+# _format_price_line takes `quote` as a plain dict from any caller, so it
+# guards independently too — these tests hand-construct a NaN quote directly,
+# bypassing get_quote entirely, to prove this layer holds on its own.
+
+def test_price_line_nan_price_is_suppressed_entirely():
+    assert _format_price_line({"price": float("nan"), "pct_change": 1.0, "avg_volume": 1000}) is None
+
+
+def test_price_line_nan_pct_change_is_dropped_not_leaked():
+    line = _format_price_line({"price": 100.0, "pct_change": float("nan"), "avg_volume": 1000})
+    assert line is not None
+    assert "nan" not in line.lower()
+    assert "₹100.00" in line
+
+
+def test_price_line_nan_volume_is_dropped_not_leaked():
+    line = _format_price_line({"price": 100.0, "pct_change": 2.0, "avg_volume": float("nan")})
+    assert line is not None
+    assert "nan" not in line.lower()
+
+
+def test_price_line_none_quote_returns_none():
+    assert _format_price_line(None) is None
+
+
+def test_price_line_normal_quote_unaffected():
+    line = _format_price_line({"price": 1670.30, "pct_change": 3.6, "avg_volume": 1_700_000})
+    assert line == "💹 ₹1,670.30 | ▲3.6% | vol 1.7M"
