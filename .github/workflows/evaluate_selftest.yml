@@ -27,6 +27,35 @@ jobs:
           key: news-db-nonexistent-key-forces-prefix-match
           restore-keys: news-db-
 
+      - name: Diagnose yfinance connectivity from THIS runner IP
+        run: |
+          python - <<'PY'
+          import warnings, time
+          warnings.filterwarnings("ignore")
+          import yfinance as yf
+          from src.scoring.market_data import get_quote, get_forward_return
+          from datetime import datetime, timezone, timedelta
+
+          # Known-good large-caps that DO have data locally (confirmed earlier).
+          # If these fail from the runner too, it's an IP/rate-limit issue, not
+          # a genuine BSE-coverage gap.
+          tickers = ["BEL.NS", "CARRARO.NS", "HCLTECH.NS", "RELIANCE.NS"]
+          for tk in tickers:
+              t0 = time.time()
+              try:
+                  h = yf.Ticker(tk).history(period="10d")
+                  print(f"{tk}: raw history() -> {len(h)} rows in {time.time()-t0:.1f}s")
+              except Exception as e:
+                  print(f"{tk}: raw history() FAILED in {time.time()-t0:.1f}s: {e}")
+
+              q = get_quote(tk)
+              print(f"{tk}: get_quote() -> {q}")
+
+              ret = get_forward_return(tk, datetime.now(timezone.utc) - timedelta(days=5), 1)
+              print(f"{tk}: get_forward_return(5 days ago, 1d) -> {ret}")
+              print()
+          PY
+
       - name: Run evaluate.py at all three horizons
         run: |
           if [ ! -f stock_news.db ]; then
