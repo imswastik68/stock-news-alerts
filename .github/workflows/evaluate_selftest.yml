@@ -56,6 +56,55 @@ jobs:
               print()
           PY
 
+      - name: Diagnose the specific unpriceable rows using their REAL published_at
+        run: |
+          python - <<'PY'
+          import warnings
+          warnings.filterwarnings("ignore")
+          from datetime import datetime, timezone
+          from sqlalchemy import select
+          from src.storage.db import get_session
+          from src.storage.models import Article
+          from src.scoring.market_data import get_forward_return
+          from src.scoring.outcomes import _HORIZONS, _MAX_TRACK_AGE_DAYS
+
+          session = get_session()
+          now = datetime.now(timezone.utc)
+
+          # Total backlog size per horizon: how many rows are eligible for a fill
+          # (this tells us if it's a batching/limit backlog vs a per-row failure).
+          for col_name, tdays, min_age in _HORIZONS:
+              col = getattr(Article, col_name)
+              from datetime import timedelta
+              cutoff = now - timedelta(days=min_age)
+              oldest = now - timedelta(days=_MAX_TRACK_AGE_DAYS)
+              stmt = select(Article.id).where(
+                  Article.alert_sent == True,
+                  Article.published_at <= cutoff,
+                  Article.published_at >= oldest,
+                  col.is_(None),
+              )
+              n = len(list(session.execute(stmt)))
+              print(f"backlog for {col_name}: {n} row(s) currently eligible for a fill")
+          print()
+
+          # Now test the SPECIFIC tickers that showed as unpriceable, using their
+          # actual stored published_at (not an arbitrary test date).
+          for tk in ["BEL.NS", "CARRARO.NS", "HCLTECH.NS", "SOMANYCERA.NS"]:
+              stmt = select(Article).where(
+                  Article.ticker == tk, Article.alert_sent == True, Article.ret_1d.is_(None)
+              ).limit(3)
+              rows = list(session.execute(stmt).scalars())
+              if not rows:
+                  print(f"{tk}: no NULL ret_1d rows found (already filled or none exist)")
+                  continue
+              for a in rows:
+                  age_days = (now - a.published_at).total_seconds() / 86400
+                  ret = get_forward_return(tk, a.published_at, 1)
+                  print(f"{tk}: id={a.id} published_at={a.published_at} (age={age_days:.1f}d) -> get_forward_return={ret}")
+          session.close()
+          PY
+
       - name: Run evaluate.py at all three horizons
         run: |
           if [ ! -f stock_news.db ]; then
