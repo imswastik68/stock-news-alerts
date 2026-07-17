@@ -21,6 +21,11 @@ class Article(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     ticker: Mapped[str] = mapped_column(String, index=True)
+    # Human-readable company name (from the exchange filing). Kept alongside the
+    # ticker so a BSE-only scrip that never resolves to an NSE symbol — ticker
+    # is then a bare number like '532933.BO' — can still show its name in the
+    # alert instead of a meaningless code. NULL for older rows / when unknown.
+    company_name: Mapped[str | None] = mapped_column(String, nullable=True)
     headline: Mapped[str] = mapped_column(String)
     # sha256 of lowercased/stripped headline — dedupes the same story appearing
     # under different URLs across sources (NSE filing vs. news aggregator rewrite).

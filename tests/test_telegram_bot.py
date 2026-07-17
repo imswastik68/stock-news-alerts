@@ -14,9 +14,10 @@ from src.alerting.telegram_bot import _display_ticker, _format_alert, _format_pr
 from src.storage.models import Article
 
 
-def _article(ticker: str) -> Article:
+def _article(ticker: str, company_name: str | None = None) -> Article:
     return Article(
         ticker=ticker,
+        company_name=company_name,
         headline="Test headline",
         url="https://example.com/x",
         source="nse_announcements",
@@ -53,6 +54,33 @@ def test_format_alert_nse_title_unaffected():
     text = _format_alert(_article("RELIANCE.NS"))
     title_line = text.splitlines()[0]
     assert "RELIANCE.NS" in title_line
+
+
+# ── BSE company-name display ─────────────────────────────────────────────────
+# A BSE-only scrip code ('532933.BO') is a meaningless number to a human. When
+# the company name is known it must lead the title instead — the raw number is
+# what actually went out for 11 alerts and prompted this fix.
+
+def test_bse_ticker_display_uses_company_name_when_available():
+    assert _display_ticker("539016.BO", "Aurum PropTech") == "Aurum PropTech (BSE)"
+
+
+def test_bse_ticker_display_falls_back_to_code_without_company_name():
+    assert _display_ticker("539016.BO", None) == "539016 (BSE)"
+    assert _display_ticker("539016.BO", "") == "539016 (BSE)"
+
+
+def test_nse_ticker_display_ignores_company_name():
+    # Dual-listed names already resolve to a real NSE ticker; keep showing it.
+    assert _display_ticker("RELIANCE.NS", "Reliance Industries") == "RELIANCE.NS"
+
+
+def test_format_alert_bse_title_shows_company_name_not_number():
+    text = _format_alert(_article("539016.BO", company_name="Aurum PropTech"))
+    title_line = text.splitlines()[0]
+    assert "Aurum PropTech (BSE)" in title_line
+    assert "539016" not in title_line
+    assert ".BO" not in title_line
 
 
 # ── NaN price-line guard ─────────────────────────────────────────────────────

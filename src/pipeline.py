@@ -232,6 +232,7 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
         article = save_article(
             session,
             ticker=raw.ticker,
+            company_name=raw.summary or None,
             headline=display_headline,
             url=raw.url,
             source=raw.source,
@@ -270,6 +271,8 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             session,
             headline=display_headline,
             direction=result.direction,
+            ticker=article.ticker,
+            event_type=article.event_type,
             window_hours=settings.dedup_window_hours,
             threshold=settings.dedup_similarity_threshold,
         ):
@@ -305,6 +308,8 @@ def _send_pending_alerts(session, settings) -> int:
             session,
             headline=article.headline,
             direction=article.direction,
+            ticker=article.ticker,
+            event_type=article.event_type,
             window_hours=settings.dedup_window_hours,
             threshold=settings.dedup_similarity_threshold,
         ):

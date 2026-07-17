@@ -49,6 +49,7 @@ def _ensure_schema(engine) -> None:
         "impact_horizon": "ALTER TABLE articles ADD COLUMN impact_horizon VARCHAR DEFAULT 'unknown'",
         "source_quality": "ALTER TABLE articles ADD COLUMN source_quality FLOAT DEFAULT 0.0",
         "is_material": "ALTER TABLE articles ADD COLUMN is_material BOOLEAN DEFAULT 0",
+        "company_name": "ALTER TABLE articles ADD COLUMN company_name VARCHAR",
         "category": "ALTER TABLE articles ADD COLUMN category VARCHAR DEFAULT ''",
         "impact_tier": "ALTER TABLE articles ADD COLUMN impact_tier VARCHAR DEFAULT ''",
         "ret_1d": "ALTER TABLE articles ADD COLUMN ret_1d FLOAT",
@@ -82,6 +83,7 @@ def save_article(
     ticker: str,
     headline: str,
     url: str,
+    company_name: str | None = None,
     source: str,
     published_at: datetime,
     event_type: str,
@@ -97,6 +99,7 @@ def save_article(
 ) -> Article:
     article = Article(
         ticker=ticker,
+        company_name=company_name,
         headline=headline,
         headline_hash=headline_hash(headline),
         url=url,

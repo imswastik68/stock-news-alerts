@@ -30,11 +30,15 @@ def session():
     s.close()
 
 
-def _add_sent_alert(session, headline: str, direction: str = "bullish", created_at=None) -> None:
+def _add_sent_alert(
+    session, headline: str, direction: str = "bullish", created_at=None,
+    ticker: str = "X", event_type: str = "partnership_contract",
+) -> None:
     a = Article(
-        ticker="X", headline=headline, headline_hash="h" + headline[:10], url=f"u-{headline[:20]}",
+        ticker=ticker, headline=headline, headline_hash="h" + headline[:10],
+        url=f"u-{ticker}-{headline[:20]}",
         source="nse_announcements", published_at=datetime.now(timezone.utc),
-        event_type="partnership_contract", direction=direction, confidence=0.8,
+        event_type=event_type, direction=direction, confidence=0.8,
         reasoning="x", alert_sent=True,
         created_at=created_at or datetime.now(timezone.utc),
     )
@@ -122,3 +126,82 @@ def test_only_alert_sent_rows_considered(session):
 def test_empty_headline_never_flagged_duplicate(session):
     _add_sent_alert(session, "Some alert")
     assert not is_duplicate_of_recent_alert(session, headline="", direction="bullish")
+
+
+# ── low-information restatement path (same ticker + event_type, no digit) ─────
+# The order/deal re-surfaces and the LLM distils the thinner copy into a
+# content-free headline ("Wins new order") that scores far below the text
+# threshold against the specific first alert. Confirmed live for CHAVDA,
+# WELCORP, ARIS, GP Eco, Happy Square.
+
+def test_no_digit_restatement_same_ticker_and_event_is_suppressed(session):
+    _add_sent_alert(
+        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
+        ticker="CHAVDA.NS", event_type="partnership_contract",
+    )
+    assert is_duplicate_of_recent_alert(
+        session,
+        headline="Wins new order",  # no figure — adds nothing over the above
+        direction="bullish",
+        ticker="CHAVDA.NS",
+        event_type="partnership_contract",
+    )
+
+
+def test_no_digit_restatement_different_ticker_not_suppressed(session):
+    # Different company that happens to also just "win an order" is a real,
+    # separate alert — the ticker guard must protect it.
+    _add_sent_alert(
+        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
+        ticker="CHAVDA.NS", event_type="partnership_contract",
+    )
+    assert not is_duplicate_of_recent_alert(
+        session,
+        headline="Wins new order",
+        direction="bullish",
+        ticker="WELCORP.NS",
+        event_type="partnership_contract",
+    )
+
+
+def test_no_digit_restatement_different_event_type_not_suppressed(session):
+    _add_sent_alert(
+        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
+        ticker="CHAVDA.NS", event_type="partnership_contract",
+    )
+    assert not is_duplicate_of_recent_alert(
+        session,
+        headline="Board reshuffle announced",  # different event, no digit
+        direction="bullish",
+        ticker="CHAVDA.NS",
+        event_type="regulatory_legal",
+    )
+
+
+def test_evolving_update_with_a_new_figure_still_alerts_even_on_same_ticker_event(session):
+    # The critical non-regression: a genuinely new update on the same ticker +
+    # event_type carries the new number, so it keeps a digit and must NOT be
+    # caught by the no-digit path (nor by text similarity, 0.64 < 0.65).
+    _add_sent_alert(
+        session, "To invest up to Rs 58.80 cr in Siravit Ceramics",
+        ticker="SOMANYCERA.NS", event_type="ma_deal",
+    )
+    assert not is_duplicate_of_recent_alert(
+        session,
+        headline="Approves investments of up to Rs 75.80 cr in three entities",
+        direction="bullish",
+        ticker="SOMANYCERA.NS",
+        event_type="ma_deal",
+    )
+
+
+def test_no_digit_path_requires_ticker_and_event_type(session):
+    # Without ticker/event_type (older callers), the no-digit path is inert and
+    # only text similarity applies — a no-digit candidate is NOT auto-suppressed.
+    _add_sent_alert(
+        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
+        ticker="CHAVDA.NS", event_type="partnership_contract",
+    )
+    assert not is_duplicate_of_recent_alert(
+        session, headline="Wins new order", direction="bullish"
+    )

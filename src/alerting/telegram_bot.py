@@ -31,15 +31,23 @@ def _event_type_label(event_type: str) -> str:
     return event_type.replace("_", " ").title()
 
 
-def _display_ticker(ticker: str) -> str:
+def _display_ticker(ticker: str, company_name: str | None = None) -> str:
     """BSE tickers like '532933.BO' are indistinguishable from a domain name
     ending in Bolivia's real '.bo' ccTLD — Telegram auto-linkifies them, which
     splits our single bold title into two adjacent bold spans (renders as a
     garbled '****' and turns the ticker into a stray clickable link). Display
     BSE tickers without the dotted suffix; the real '.BO' ticker is still used
-    everywhere else (dedup, price lookups) — this only affects the alert text."""
+    everywhere else (dedup, price lookups) — this only affects the alert text.
+
+    A BSE-only scrip code is a meaningless number to a human, so lead with the
+    company name when we have it ('Aurum PropTech (BSE)' beats '539016 (BSE)').
+    Only .NS-unresolved BSE listings hit this — dual-listed names already show
+    their NSE ticker."""
     if ticker.endswith(".BO"):
-        return f"{ticker[:-3]} (BSE)"
+        code = ticker[:-3]
+        if company_name and company_name.strip():
+            return f"{company_name.strip()} (BSE)"
+        return f"{code} (BSE)"
     return ticker
 
 
@@ -76,7 +84,7 @@ def _format_alert(article: Article, quote: dict | None = None) -> str:
     confidence_pct = round(article.confidence * 100)
 
     lines = [
-        f"{emoji} <b>{_e(_display_ticker(article.ticker))} — {_e(event_label)} ({_e(direction_label)})</b>",
+        f"{emoji} <b>{_e(_display_ticker(article.ticker, article.company_name))} — {_e(event_label)} ({_e(direction_label)})</b>",
     ]
     # Show the official exchange category for filings — this is the "why it's
     # high-impact" signal, like the pro platforms' tags.
