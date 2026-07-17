@@ -10,7 +10,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from evaluate import IMPACT_MOVE_THRESHOLD_PCT, coverage_stats, impact_stats
+from evaluate import IMPACT_MOVE_THRESHOLD_PCT, alpha_of, coverage_stats, impact_stats, wilson_ci
 from src.storage.db import save_article, mark_alert_sent
 from src.storage.models import Base
 
@@ -147,3 +147,100 @@ def test_impact_stats_threshold_is_inclusive():
 def test_impact_stats_below_threshold_not_counted():
     avg_abs, rate = impact_stats([IMPACT_MOVE_THRESHOLD_PCT - 0.01])
     assert rate == 0.0
+
+
+# ── wilson_ci ────────────────────────────────────────────────────────────────
+
+def test_wilson_ci_known_values():
+    # Reference values (standard Wilson score interval, z=1.96), cross-checked
+    # against this module's own live verification during implementation.
+    lo, hi = wilson_ci(1, 10)
+    assert lo == pytest.approx(0.018, abs=0.001)
+    assert hi == pytest.approx(0.404, abs=0.001)
+
+    lo, hi = wilson_ci(0, 2)
+    assert lo == pytest.approx(0.0, abs=0.001)
+    assert hi == pytest.approx(0.658, abs=0.001)
+
+    lo, hi = wilson_ci(5, 10)
+    assert lo == pytest.approx(0.237, abs=0.001)
+    assert hi == pytest.approx(0.763, abs=0.001)
+
+    lo, hi = wilson_ci(10, 10)
+    assert lo == pytest.approx(0.722, abs=0.001)
+    assert hi == pytest.approx(1.0, abs=0.001)
+
+
+def test_wilson_ci_zero_n_is_maximally_uninformative():
+    assert wilson_ci(0, 0) == (0.0, 1.0)
+
+
+def test_wilson_ci_small_n_interval_is_wide():
+    # The exact motivation for adding this: a 2-sample "0%" bucket must not
+    # read like a confident result — its interval should span most of [0, 1].
+    lo, hi = wilson_ci(0, 2)
+    assert hi - lo > 0.5
+
+
+# ── alpha_of ─────────────────────────────────────────────────────────────────
+
+def test_alpha_of_is_ret_minus_index_ret():
+    assert alpha_of(3.0, 1.0) == pytest.approx(2.0)
+    assert alpha_of(-1.0, -3.0) == pytest.approx(2.0)
+
+
+def test_alpha_of_none_when_index_leg_missing():
+    assert alpha_of(3.0, None) is None
+
+
+def test_alpha_can_flip_a_raw_hit_into_a_miss():
+    # The whole point of alpha: a stock that rose 1% while the market rose 2%
+    # underperformed the market by 1%, even though the raw return was positive.
+    ret, idx_ret = 1.0, 2.0
+    alpha = alpha_of(ret, idx_ret)
+    raw_hit = ret > 0  # bullish call, raw return positive -> raw "hit"
+    alpha_hit = alpha > 0  # but alpha is negative -> alpha "miss"
+    assert raw_hit is True
+    assert alpha_hit is False
+
+
+def test_alpha_can_flip_a_raw_miss_into_a_hit():
+    # Symmetric case: stock fell 1% but the market fell 3% -> alpha +2%, so a
+    # bullish call that looks like a raw miss is actually a relative win.
+    ret, idx_ret = -1.0, -3.0
+    alpha = alpha_of(ret, idx_ret)
+    raw_hit = ret > 0
+    alpha_hit = alpha > 0
+    assert raw_hit is False
+    assert alpha_hit is True
+
+
+# ── alpha rows: NULL idx excluded from alpha stats but kept in raw ──────────
+
+def _add_with_idx(session, ticker, ret_3d, idx_ret_3d, seq=1, published_days_ago=5):
+    published_at = datetime.now(timezone.utc) - timedelta(days=published_days_ago)
+    a = save_article(
+        session, ticker=ticker, headline=f"{ticker} headline {seq}", url=f"u-{ticker}-{seq}",
+        source="nse_announcements", published_at=published_at, category="Acquisition",
+        impact_tier="high", event_type="ma_deal", direction="bullish", confidence=0.7,
+        materiality_score=0.7, impact_horizon="1_3_days", source_quality=1.0,
+        is_material=True, reasoning="x",
+    )
+    mark_alert_sent(session, a.id)
+    a.ret_3d = ret_3d
+    a.idx_ret_3d = idx_ret_3d
+    session.commit()
+    return a
+
+
+def test_rows_with_null_idx_ret_kept_for_raw_but_excluded_from_alpha(session):
+    from evaluate import _rows
+
+    _add_with_idx(session, "A.NS", 3.0, 1.0, seq=1)   # has idx leg
+    _add_with_idx(session, "B.NS", 2.0, None, seq=2)  # idx leg missing
+
+    rows = _rows(session, "ret_3d")
+    assert len(rows) == 2  # both counted in raw stats
+
+    alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx in rows if idx is not None]
+    assert len(alpha_rows) == 1  # only the one with a recorded index leg

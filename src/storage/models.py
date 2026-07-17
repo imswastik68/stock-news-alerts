@@ -49,3 +49,12 @@ class Article(Base):
     ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
     ret_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
     ret_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    # NIFTY 50 (^NSEI) forward % return over the SAME window as ret_Nd, so
+    # evaluate.py can compute alpha = ret_Nd - idx_ret_Nd. Raw returns alone
+    # can't tell "our news call added value" apart from "the whole market
+    # moved" — this is what separates the two. Independently nullable: a stock
+    # return can mature (and be recorded) before/without a successful index
+    # fetch, backfilled on a later pass.
+    idx_ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    idx_ret_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
+    idx_ret_5d: Mapped[float | None] = mapped_column(Float, nullable=True)

@@ -1,7 +1,7 @@
 """
 NSE equity symbol master — free company-name -> ticker resolution.
 
-Two real gaps this closes:
+Three real gaps this closes:
   1. BSE-only-priced alerts (e.g. `544574.BO`) for companies that are ALSO
      listed on NSE (e.g. Tata Capital = TATACAP.NS) have zero Yahoo Finance
      price data under their BSE scrip, permanently breaking outcome tracking
@@ -10,18 +10,30 @@ Two real gaps this closes:
      heuristic in exchange_rss.py sometimes yields an invalid or wrong symbol
      (e.g. "AWHCLP" instead of "AWHCL"). This validates/corrects it against the
      real symbol list, falling back to a company-name lookup.
+  3. Some alerted companies are SME/Emerge-board listings absent from the
+     main-board list entirely (e.g. Chavda Infra, Transteel Seating) — these
+     showed up as "no ticker at all" (raw company name, unpriced, un-deduped).
+     Merging NSE's separate SME/Emerge list resolves them too.
 
-Source: NSE's own published equity list (no auth, no key):
-  https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
+Sources: NSE's own published equity lists (no auth, no key):
+  main board: https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv
+  SME/Emerge: https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv
+Note the company-name COLUMN differs between the two: main board uses
+"NAME OF COMPANY" (spaces), SME uses "NAME_OF_COMPANY" (underscore) — verified
+live 2026-07-14. Both are tried per row so either header works.
 
 Matching is STRICT normalized-full-name-equality only — never fuzzy/substring.
 "Damodar Valley Corporation" (a PSU, not NSE-listed) must NOT match "Damodar
 Industries Limited" just because they share a word; a fuzzy matcher would get
 this wrong, so it isn't used.
 
-Fails soft: any network/parse problem returns an empty master, and every public
-function degrades to "unresolved" (None / False) rather than raising — matches
-the project-wide contract that ingestion never crashes the pipeline.
+On a name collision between the two lists, the main board wins (it's the
+larger, more liquid, more likely-correct listing for that exact name).
+
+Fails soft, per source independently: a failure fetching the SME list does not
+prevent main-board resolution (and vice versa). Every public function degrades
+to "unresolved" (None / False) rather than raising if BOTH fail — matches the
+project-wide contract that ingestion never crashes the pipeline.
 """
 
 from __future__ import annotations
@@ -40,6 +52,8 @@ from src.config import ROOT_DIR
 logger = logging.getLogger(__name__)
 
 _MASTER_URL = "https://nsearchives.nseindia.com/content/equities/EQUITY_L.csv"
+_SME_MASTER_URL = "https://nsearchives.nseindia.com/emerge/corporates/content/SME_EQUITY_L.csv"
+_NAME_COLUMNS = ("NAME OF COMPANY", "NAME_OF_COMPANY")
 _UA = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -97,22 +111,41 @@ def _write_cache(mapping: dict[str, str]) -> None:
         logger.debug("symbol_master: cache write failed: %s", exc)
 
 
-def _download_master() -> dict[str, str]:
+def _company_name(row: dict) -> str:
+    for col in _NAME_COLUMNS:
+        val = row.get(col)
+        if val:
+            return val
+    return ""
+
+
+def _download_csv_mapping(url: str, source_label: str) -> dict[str, str]:
+    """Fetch one NSE symbol-list CSV -> {normalized company name: SYMBOL}.
+    Fails soft: any network/parse problem logs and returns {}."""
     try:
-        resp = requests.get(_MASTER_URL, headers=_UA, timeout=_TIMEOUT)
+        resp = requests.get(url, headers=_UA, timeout=_TIMEOUT)
         resp.raise_for_status()
         reader = csv.DictReader(io.StringIO(resp.text))
         mapping: dict[str, str] = {}
         for row in reader:
             symbol = (row.get("SYMBOL") or "").strip()
-            company = row.get("NAME OF COMPANY") or ""
+            company = _company_name(row)
             if not symbol or not company:
                 continue
             mapping[_normalize(company)] = symbol
         return mapping
     except Exception as exc:
-        logger.warning("symbol_master: download/parse failed: %s", exc)
+        logger.warning("symbol_master: %s download/parse failed: %s", source_label, exc)
         return {}
+
+
+def _download_master() -> dict[str, str]:
+    """Main-board + SME/Emerge symbol lists, merged (main board wins on a name
+    collision). Each source fails independently — one being unreachable never
+    blocks the other."""
+    sme = _download_csv_mapping(_SME_MASTER_URL, "SME/Emerge")
+    main = _download_csv_mapping(_MASTER_URL, "main board")
+    return {**sme, **main}
 
 
 def _load_master() -> dict[str, str]:

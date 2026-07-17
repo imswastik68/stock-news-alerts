@@ -9,7 +9,8 @@ production RSS data, not a hypothetical.
 
 from __future__ import annotations
 
-from unittest.mock import patch
+import requests
+from unittest.mock import MagicMock, patch
 
 from src.ingestion import symbol_master
 
@@ -19,6 +20,14 @@ _FAKE_CSV = (
     "HGINFRA,H.G. Infra Engineering Limited,EQ,01-JAN-2018,10\n"
     "DAMODARIND,Damodar Industries Limited,EQ,01-JAN-1995,10\n"
     "TATACAP,Tata Capital Limited,EQ,01-JAN-2024,10\n"
+)
+
+# SME/Emerge CSV uses NAME_OF_COMPANY (underscore) instead of the main board's
+# "NAME OF COMPANY" (spaces) — verified live against NSE's real SME CSV.
+_FAKE_SME_CSV = (
+    "SYMBOL,NAME_OF_COMPANY,SERIES,DATE_OF_LISTING,PAID_UP_VALUE\n"
+    "CHAVDA,Chavda Infra Limited,SM,01-JAN-2023,10\n"
+    "TRANSTEEL,Transteel Seating Technologies Limited,SM,01-JAN-2023,10\n"
 )
 
 
@@ -101,3 +110,82 @@ def test_disk_cache_used_instead_of_redownloading():
         result = symbol_master.resolve_nse_symbol("Tata Capital Limited")
         assert result == "TATACAP"
         mock_download.assert_not_called()
+
+
+# ── SME/Emerge merge (_download_master / _download_csv_mapping) ─────────────
+
+def _fake_get(url, headers=None, timeout=None):
+    resp = MagicMock()
+    resp.raise_for_status = MagicMock()
+    if url == symbol_master._SME_MASTER_URL:
+        resp.text = _FAKE_SME_CSV
+    elif url == symbol_master._MASTER_URL:
+        resp.text = _FAKE_CSV
+    else:
+        raise AssertionError(f"unexpected URL {url}")
+    return resp
+
+
+def test_sme_only_company_name_resolves_via_download_master():
+    # A name that exists ONLY in the SME CSV (NAME_OF_COMPANY header) must
+    # resolve once merged into the same master mapping.
+    with patch.object(symbol_master.requests, "get", side_effect=_fake_get):
+        merged = symbol_master._download_master()
+    assert merged[symbol_master._normalize("Chavda Infra Limited")] == "CHAVDA"
+    assert merged[symbol_master._normalize("Transteel Seating Technologies Limited")] == "TRANSTEEL"
+
+
+def test_main_board_wins_on_name_collision():
+    sme_csv = "SYMBOL,NAME_OF_COMPANY\nSMESYM,Tata Capital Limited\n"
+
+    def fake_get(url, headers=None, timeout=None):
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        if url == symbol_master._SME_MASTER_URL:
+            resp.text = sme_csv
+        else:
+            resp.text = _FAKE_CSV  # has TATACAP for the same name
+        return resp
+
+    with patch.object(symbol_master.requests, "get", side_effect=fake_get):
+        merged = symbol_master._download_master()
+    assert merged[symbol_master._normalize("Tata Capital Limited")] == "TATACAP"
+
+
+def test_sme_fetch_failure_still_leaves_main_board_resolving():
+    def fake_get(url, headers=None, timeout=None):
+        if url == symbol_master._SME_MASTER_URL:
+            raise requests.exceptions.ConnectionError("SME archive unreachable")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = _FAKE_CSV
+        return resp
+
+    with patch.object(symbol_master.requests, "get", side_effect=fake_get):
+        merged = symbol_master._download_master()
+    assert merged[symbol_master._normalize("Tata Capital Limited")] == "TATACAP"
+    assert symbol_master._normalize("Chavda Infra Limited") not in merged
+
+
+def test_main_board_fetch_failure_still_leaves_sme_resolving():
+    def fake_get(url, headers=None, timeout=None):
+        if url == symbol_master._MASTER_URL:
+            raise requests.exceptions.ConnectionError("main board archive unreachable")
+        resp = MagicMock()
+        resp.raise_for_status = MagicMock()
+        resp.text = _FAKE_SME_CSV
+        return resp
+
+    with patch.object(symbol_master.requests, "get", side_effect=fake_get):
+        merged = symbol_master._download_master()
+    assert merged[symbol_master._normalize("Chavda Infra Limited")] == "CHAVDA"
+    assert symbol_master._normalize("Tata Capital Limited") not in merged
+
+
+def test_end_to_end_sme_name_resolves_through_resolve_nse_symbol():
+    with patch.object(symbol_master.requests, "get", side_effect=_fake_get), \
+         patch.object(symbol_master, "_read_cache", return_value=None), \
+         patch.object(symbol_master, "_write_cache"):
+        assert symbol_master.resolve_nse_symbol("Chavda Infra Limited") == "CHAVDA"
+        # main board still works too
+        assert symbol_master.resolve_nse_symbol("Tata Capital Limited") == "TATACAP"
