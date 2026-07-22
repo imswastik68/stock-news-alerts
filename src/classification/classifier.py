@@ -65,6 +65,11 @@ _rate_limited_backends: set[str] = set()
 
 _SYSTEM_PROMPT = """You read an Indian-stock exchange filing (or news item) and classify it. The text may be extracted from a filing PDF, so ignore letterhead/addresses/boilerplate and focus on the substance. Return ONLY a JSON object, no other text.
 
+UNITS — READ THIS BEFORE QUOTING ANY MONEY FIGURE. Indian results tables state their unit in a header line such as "(Rs. in million)", "(Rs. in lakh)", "(Rs. in crore)" or "(Amount in Rs. '000)". That unit applies to EVERY number in the table. Find it and convert before writing any figure:
+  1 crore = 10 million = 100 lakh = 10,000 thousand
+So "Profit 9,751.2" under "(Rs. in million)" is Rs 975.1 cr, NOT Rs 9,751.2 cr. Under "(Rs. in lakh)" the same digits are Rs 97.5 cr.
+ALWAYS express money in crore as "Rs <n> cr", whatever unit the filing used. Never copy the digits across unconverted, and never relabel a figure's unit without converting it. If no unit header is stated, use the figure as printed and do not guess a multiplier. Percentages, ratios and per-share amounts are never converted.
+
 headline: a clean, factual one-line summary of what actually happened, with the key number if present (e.g. "Reports FY26 net profit up 29% to Rs 236 cr", "Wins Rs 5,000 cr order from NHAI", "Board recommends Rs 229 final dividend"). If the filing is purely procedural (newspaper notice, AGM intimation, trading-window closure, compliance certificate) say so plainly (e.g. "Routine AGM notice, no financial detail").
 event_type (pick ONE): earnings_surprise (results beat/miss), guidance_change (company revises outlook), ma_deal (merger/acquisition/stake sale), analyst_rating (rating/target change), regulatory_legal (regulator/investigation/litigation/penalty), insider_activity (promoter/insider buy/sell), partnership_contract (order win/partnership), macro_sector (sector/macro), other.
 direction: bullish | bearish | neutral (likely short-term price impact).
@@ -74,6 +79,9 @@ materiality_score: 0.0-1.0 — is this genuinely stock-moving for THIS company? 
 impact_horizon: intraday | 1_3_days | swing | long_term | unknown.
 
 Example: {"headline":"Reports FY26 net profit up 29% to Rs 236 cr","event_type":"earnings_surprise","direction":"bullish","reason":"FY26 net profit rose 29% YoY to Rs 236 cr.","magnitude_pct":29.0,"materiality_score":0.88,"impact_horizon":"1_3_days"}
+
+Unit-conversion example — filing says "(Rs. in million)" and "Profit for the period 9,751.2" vs "6,592.3" prior year, so 9,751.2 million = Rs 975.1 cr:
+{"headline":"Reports Q1 net profit up 48% YoY to Rs 975.1 cr","event_type":"earnings_surprise","direction":"bullish","reason":"Q1 net profit rose 48% YoY to Rs 975.1 cr from Rs 659.2 cr.","magnitude_pct":48.0,"materiality_score":0.9,"impact_horizon":"1_3_days"}
 """
 
 _STRICT_SUFFIX = (

@@ -202,3 +202,30 @@ def test_reset_cycle_state_clears_rate_limit_tracking():
         assert classifier.is_rate_limited() is True
         classifier.reset_cycle_state()
         assert classifier.is_rate_limited() is False
+
+
+# ── unit-conversion guidance in the system prompt ────────────────────────────
+# Nestle India's Q1 results alerted as "Rs 9,751.2 cr" when the true figure was
+# Rs 975.1 cr: the filing reported in "(Rs. in million)" and the model copied
+# the digits across while labelling them crore — a 10x overstatement. The prompt
+# had no unit guidance at all, and every example used "Rs X cr", which actively
+# pushed the model toward that label. These assert the guidance stays present;
+# the conversion behaviour itself was verified against a live model across
+# crore/lakh/million filings (all three resolve to Rs 975.1 cr).
+
+def test_system_prompt_states_the_unit_conversion_factors():
+    p = classifier._SYSTEM_PROMPT
+    assert "1 crore = 10 million = 100 lakh" in p
+
+
+def test_system_prompt_carries_the_million_worked_example():
+    # The concrete 9,751.2 million -> Rs 975.1 cr case, so the model sees the
+    # exact failure it got wrong rather than only an abstract rule.
+    p = classifier._SYSTEM_PROMPT
+    assert "9,751.2" in p and "975.1" in p
+
+
+def test_system_prompt_requires_crore_output_and_forbids_bare_copying():
+    p = classifier._SYSTEM_PROMPT.lower()
+    assert "always express money in crore" in p
+    assert "never copy the digits across unconverted" in p
