@@ -26,6 +26,7 @@ from datetime import datetime, timedelta, timezone
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from src.ingestion import bse_bhavcopy
 from src.scoring.market_data import get_forward_return
 from src.storage.models import Article
 
@@ -46,6 +47,24 @@ _HORIZONS = [
 # Stop retrying once an alert is older than this (dead/illiquid tickers Yahoo
 # never prices shouldn't be re-fetched forever).
 _MAX_TRACK_AGE_DAYS = 20
+
+
+def _stock_forward_return(session: Session, ticker: str, published_at, tdays: int) -> float | None:
+    """Forward return for one alerted ticker, Yahoo first and BSE's own bhavcopy
+    as the fallback. yfinance prices nothing at all for a large share of BSE
+    scrip codes — that gap alone made 63-71 alerted rows per horizon permanently
+    unmeasurable and biased the whole track record toward the (larger, NSE-listed)
+    names it could price. Yahoo stays first because it's already cached per
+    process and covers every .NS ticker; bhavcopy only runs when Yahoo has
+    nothing AND the ticker is a BSE scrip."""
+    ret = get_forward_return(ticker, published_at, tdays)
+    if ret is not None:
+        return ret
+    try:
+        return bse_bhavcopy.get_forward_return(session, ticker, published_at, tdays)
+    except Exception as exc:
+        logger.debug("outcomes: bhavcopy fallback failed for %s: %s", ticker, exc)
+        return None
 
 
 def track_outcomes(session: Session, limit: int = 60) -> int:
@@ -75,7 +94,7 @@ def track_outcomes(session: Session, limit: int = 60) -> int:
         )
         for article in session.execute(stmt).scalars():
             if getattr(article, col) is None:
-                ret = get_forward_return(article.ticker, article.published_at, tdays)
+                ret = _stock_forward_return(session, article.ticker, article.published_at, tdays)
                 if ret is not None:
                     setattr(article, col, round(ret, 2))
                     recorded += 1

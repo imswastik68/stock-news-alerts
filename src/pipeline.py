@@ -16,6 +16,7 @@ from datetime import datetime, timedelta, timezone
 
 from src.classification.classifier import classify, is_rate_limited, reset_cycle_state
 from src.config import configure_logging, get_settings
+from src.ingestion import bse_bhavcopy
 from src.ingestion.common import RawArticle
 from src.ingestion.exchange_rss import fetch_bse_rss, fetch_nse_rss
 from src.ingestion.nse_announcements import fetch_nse_market_wide
@@ -261,6 +262,8 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
         min_source_quality_for_alerts=settings.min_source_quality_for_alerts,
         excluded_event_types=_EXCLUDED_FROM_ALERTS,
         impact_tier=impact_tier,
+        high_tier_confidence_threshold=settings.high_tier_confidence_threshold,
+        directionally_unreliable_event_types=settings.directionally_unreliable_event_types,
     ):
         # Same real-world event can surface as genuinely different filings — a
         # dual-listed company disclosing to NSE and BSE separately, or an
@@ -302,6 +305,7 @@ def _send_pending_alerts(session, settings) -> int:
         confidence_threshold=settings.alert_confidence_threshold,
         min_source_quality=settings.min_source_quality_for_alerts,
         min_published_at=datetime.now(timezone.utc) - timedelta(hours=settings.max_news_age_hours),
+        directionally_unreliable_event_types=settings.directionally_unreliable_event_types,
     )
     for article in pending:
         if is_duplicate_of_recent_alert(
@@ -371,6 +375,13 @@ def run_pipeline() -> dict:
             track_outcomes(session, limit=60)
         except Exception as exc:
             logger.error("pipeline: outcome tracking crashed: %s", exc)
+        # Cached BSE closes are only needed inside the tracking window; without
+        # pruning they'd grow ~4900 rows per trading day forever inside the DB
+        # that GitHub Actions carries between runs.
+        try:
+            bse_bhavcopy.prune_old_days(session)
+        except Exception as exc:
+            logger.error("pipeline: bhavcopy prune crashed: %s", exc)
     finally:
         session.close()
 

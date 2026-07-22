@@ -29,6 +29,8 @@ def is_directional_material_alert(
     min_source_quality_for_alerts: float,
     excluded_event_types: set[str],
     impact_tier: str = "",
+    high_tier_confidence_threshold: float = 0.0,
+    directionally_unreliable_event_types: frozenset[str] | set[str] = frozenset(),
 ) -> bool:
     if result.event_type == "classification_failed":
         return False
@@ -36,13 +38,25 @@ def is_directional_material_alert(
         return False
     if source_quality < min_source_quality_for_alerts:
         return False
+    # Event types with a measured directional record bad enough that we don't
+    # claim a direction at all. Checked BEFORE the HIGH-tier path because the
+    # problem isn't whether the news matters (it does) — it's that our call on
+    # which way it moves the stock has no demonstrated edge. ma_deal was
+    # 0-for-35 in production while carrying the table's highest prior (0.90).
+    if result.event_type in directionally_unreliable_event_types:
+        return False
     # A HIGH-impact exchange category (order win, M&A, results, rating, penalty,
-    # bonus, dividend, buyback…) with a directional view is a genuine catalyst —
-    # always alert, even if the LLM bucketed event_type as "other" (bonus/split/
-    # dividend don't map cleanly to the 9 types). The exchange category is the
-    # authority here, so this override comes before the "other" exclusion.
+    # bonus, dividend, buyback…) with a directional view is a genuine catalyst,
+    # so it gets a much lower confidence bar than a media item — but NOT an
+    # unconditional pass. It used to `return True` here, which meant confidence
+    # was never consulted for 94% of alerts and the entire calibration loop had
+    # no effect on what got sent; an event type could measure 0% forever and
+    # keep alerting. The floor is what gives calibration teeth: as measured
+    # hit-rates decay, the shrunk confidence eventually drops below it and that
+    # event type goes quiet on its own. Still deliberately ahead of the "other"
+    # exclusion, so a bonus/split/dividend bucketed as "other" can alert.
     if impact_tier == "high":
-        return True
+        return confidence >= high_tier_confidence_threshold
     if result.event_type in excluded_event_types:
         return False
     # Any other exchange filing (impact_tier set = it came from NSE/BSE): the LLM

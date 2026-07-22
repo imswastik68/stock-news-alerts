@@ -49,9 +49,11 @@ def _mock_response(xml: str) -> Mock:
 
 
 def test_bse_rss_parses_scrip_ticker_and_filters_stale():
-    # BSE-only listing (not resolvable to an NSE ticker) — falls back to the
-    # numeric scrip code, as before the symbol-resolution wiring was added.
+    # BSE-only listing (resolvable by neither ISIN nor name) — falls back to the
+    # numeric scrip code. Those scrips are priced from BSE's own bhavcopy rather
+    # than Yahoo (src/ingestion/bse_bhavcopy.py).
     with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)), \
+         patch("src.ingestion.exchange_rss._nse_symbol_for_scrip", return_value=None), \
          patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value=None):
         articles = exchange_rss.fetch_bse_rss(hours_back=36)
 
@@ -65,14 +67,37 @@ def test_bse_rss_parses_scrip_ticker_and_filters_stale():
 
 def test_bse_rss_dual_listed_company_resolves_to_nse_ticker():
     # Many BSE-only scrip codes have zero Yahoo Finance price data; a company
-    # also listed on NSE should use its (priceable) NSE ticker instead.
+    # also listed on NSE should use its (priceable) NSE ticker instead. This
+    # covers the company-NAME fallback, used when ISIN can't resolve the scrip.
     with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)), \
+         patch("src.ingestion.exchange_rss._nse_symbol_for_scrip", return_value=None), \
          patch("src.ingestion.exchange_rss.resolve_nse_symbol", return_value="AWHCL") as mock_resolve:
         articles = exchange_rss.fetch_bse_rss(hours_back=36)
 
     assert len(articles) == 1
     assert articles[0].ticker == "AWHCL.NS"
     mock_resolve.assert_called_once_with("Antony Waste Handling Cell Ltd")
+
+
+def test_bse_rss_prefers_isin_resolution_over_company_name():
+    # ISIN identifies the security exactly, so it must win over the fuzzy
+    # name lookup — and the name resolver shouldn't even be consulted.
+    with patch("src.ingestion.exchange_rss.requests.get", return_value=_mock_response(_BSE_XML)), \
+         patch("src.ingestion.exchange_rss._nse_symbol_for_scrip", return_value="AWHCL") as mock_isin, \
+         patch("src.ingestion.exchange_rss.resolve_nse_symbol") as mock_name:
+        articles = exchange_rss.fetch_bse_rss(hours_back=36)
+
+    assert articles[0].ticker == "AWHCL.NS"
+    mock_isin.assert_called_once_with("543254")
+    mock_name.assert_not_called()
+
+
+def test_isin_resolution_failure_falls_back_to_name_path():
+    # A bhavcopy/network problem must never block ingestion — _nse_symbol_for_scrip
+    # swallows it and the company-name resolver still runs.
+    with patch("src.ingestion.exchange_rss.bse_bhavcopy.get_scrip_to_isin",
+               side_effect=ConnectionError("bhavcopy down")):
+        assert exchange_rss._nse_symbol_for_scrip("543254") is None
 
 
 def test_bse_rss_fetch_failure_returns_empty_list():

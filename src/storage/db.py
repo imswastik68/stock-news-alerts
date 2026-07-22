@@ -137,14 +137,21 @@ def get_pending_alert_articles(
     min_source_quality: float,
     min_published_at: datetime | None = None,
     limit: int = 25,
+    directionally_unreliable_event_types: frozenset[str] | set[str] = frozenset(),
 ) -> list[Article]:
+    # Note the unreliable types are excluded here too, not just in
+    # is_directional_material_alert(): rows stored BEFORE an event type was
+    # judged unreliable still carry their old (often high) confidence, so
+    # without this a retired type could keep leaking out via the pending path.
+    excluded = ["other", "classification_failed", "procedural"]
+    excluded += [e for e in directionally_unreliable_event_types if e not in excluded]
     filters = [
         Article.alert_sent == False,  # noqa: E712 - SQLAlchemy comparison
         Article.is_material == True,  # noqa: E712 - SQLAlchemy comparison
         Article.confidence >= confidence_threshold,
         Article.source_quality >= min_source_quality,
         Article.direction != "neutral",
-        Article.event_type.not_in(["other", "classification_failed", "procedural"]),
+        Article.event_type.not_in(excluded),
     ]
     if min_published_at is not None:
         filters.append(Article.published_at >= min_published_at)

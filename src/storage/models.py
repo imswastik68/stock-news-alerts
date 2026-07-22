@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
-from sqlalchemy import Boolean, DateTime, Float, Integer, String
+from sqlalchemy import Boolean, Date, DateTime, Float, Integer, String
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -63,3 +63,28 @@ class Article(Base):
     idx_ret_1d: Mapped[float | None] = mapped_column(Float, nullable=True)
     idx_ret_3d: Mapped[float | None] = mapped_column(Float, nullable=True)
     idx_ret_5d: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+
+class BseClose(Base):
+    """One BSE scrip's official EOD close for one trading day, from BSE's own
+    bhavcopy (src/ingestion/bse_bhavcopy.py). Exists because yfinance prices
+    nothing for a large share of BSE scrip codes, which silently made a third of
+    alerted rows permanently unmeasurable."""
+
+    __tablename__ = "bse_closes"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    scrip: Mapped[str] = mapped_column(String, primary_key=True)
+    close: Mapped[float] = mapped_column(Float)
+
+
+class BseBhavcopyDay(Base):
+    """Marker: this date's bhavcopy has been resolved, and whether it was a
+    trading day at all. Needed because BSE serves HTTP 200 + an HTML page for
+    weekends/holidays rather than a 404 — without recording the negative, every
+    cycle would re-fetch every non-trading day forever."""
+
+    __tablename__ = "bse_bhavcopy_days"
+
+    trade_date: Mapped[date] = mapped_column(Date, primary_key=True)
+    is_trading_day: Mapped[bool] = mapped_column(Boolean, default=False)

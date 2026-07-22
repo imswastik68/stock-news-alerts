@@ -23,11 +23,13 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 
+from src.ingestion import bse_bhavcopy
 from src.ingestion.common import RawArticle
 from src.ingestion.symbol_master import (
     is_master_available,
     is_valid_nse_symbol,
     resolve_nse_symbol,
+    resolve_nse_symbol_by_isin,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +68,18 @@ def _fetch_items(url: str) -> list:
     return ET.fromstring(resp.content).findall(".//item")
 
 
+def _nse_symbol_for_scrip(scrip: str) -> str | None:
+    """BSE scrip code -> NSE SYMBOL via ISIN, or None if BSE-only/unavailable.
+    Fails soft: any problem reaching the bhavcopy just falls back to the
+    company-name resolver at the call site."""
+    try:
+        isin = bse_bhavcopy.get_scrip_to_isin().get(scrip)
+        return resolve_nse_symbol_by_isin(isin) if isin else None
+    except Exception as exc:
+        logger.debug("exchange_rss: ISIN resolution failed for scrip %s: %s", scrip, exc)
+        return None
+
+
 def fetch_bse_rss(hours_back: int = 36) -> list[RawArticle]:
     """Market-wide BSE announcements. Dual-listed companies (also on NSE) use
     their NSE ticker instead of the BSE scrip — many BSE-only scrip codes have
@@ -93,7 +107,13 @@ def fetch_bse_rss(hours_back: int = 36) -> list[RawArticle]:
             scrip = m.group(1) if m else ""
         company = re.sub(r"\s*\(\d{6}\)\s*$", "", title).strip()
 
-        nse_symbol = resolve_nse_symbol(company) if company else None
+        # Prefer ISIN (scrip -> ISIN -> NSE symbol): an ISIN identifies the
+        # security exactly, so unlike the company-name lookup it needs no
+        # normalization and can't mis-resolve a similarly-named company. The
+        # name path stays as the fallback for scrips missing from the bhavcopy.
+        nse_symbol = _nse_symbol_for_scrip(scrip) if scrip else None
+        if not nse_symbol and company:
+            nse_symbol = resolve_nse_symbol(company)
         ticker = f"{nse_symbol}.NS" if nse_symbol else (f"{scrip}.BO" if scrip else (company or "BSE?"))
 
         articles.append(

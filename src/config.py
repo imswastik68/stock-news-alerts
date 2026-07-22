@@ -57,15 +57,21 @@ class Settings:
     log_level: str
 
     confidence_base_rates: dict[str, float] = field(default_factory=dict)
+    # Confidence floor for HIGH-impact exchange filings (see confidence_table.yaml).
+    high_tier_confidence_threshold: float = 0.35
+    # Event types whose measured directional record is bad enough not to alert on.
+    directionally_unreliable_event_types: frozenset[str] = frozenset()
 
 
-def _load_confidence_table() -> tuple[dict[str, float], float]:
+def _load_confidence_table() -> tuple[dict[str, float], float, float, frozenset[str]]:
     path = ROOT_DIR / "confidence_table.yaml"
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
     base_rates = raw.get("base_rates", {})
     yaml_threshold = float(raw.get("alert_threshold", 0.70))
-    return base_rates, yaml_threshold
+    high_tier_threshold = float(raw.get("high_tier_confidence_threshold", 0.35))
+    unreliable = frozenset(raw.get("directionally_unreliable_event_types", []) or [])
+    return base_rates, yaml_threshold, high_tier_threshold, unreliable
 
 
 _settings: Settings | None = None
@@ -76,9 +82,12 @@ def get_settings() -> Settings:
     if _settings is not None:
         return _settings
 
-    base_rates, yaml_threshold = _load_confidence_table()
+    base_rates, yaml_threshold, high_tier_threshold, unreliable = _load_confidence_table()
     env_threshold = os.environ.get("ALERT_CONFIDENCE_THRESHOLD")
     threshold = float(env_threshold) if env_threshold else yaml_threshold
+    env_high_tier = os.environ.get("HIGH_TIER_CONFIDENCE_THRESHOLD")
+    if env_high_tier:
+        high_tier_threshold = float(env_high_tier)
 
     _settings = Settings(
         inference_backend=os.environ.get("INFERENCE_BACKEND", "gemini").lower(),
@@ -104,6 +113,8 @@ def get_settings() -> Settings:
         dry_run=_bool_env("DRY_RUN", False),
         log_level=os.environ.get("LOG_LEVEL", "INFO").upper(),
         confidence_base_rates=base_rates,
+        high_tier_confidence_threshold=high_tier_threshold,
+        directionally_unreliable_event_types=unreliable,
     )
     return _settings
 

@@ -1,22 +1,53 @@
 # Static confidence lookup table by event type.
 #
-# IMPORTANT: this is a starting heuristic, not a statistically validated model.
-# The rates below are subjective priors ("how often does this event type tend to
-# move the stock in the predicted direction") and have not been backtested against
-# actual price outcomes. Treat alerts as a filtered starting point for your own
-# research — not a signal to act on directly. See src/scoring/confidence.py for the
-# documented extension point for a future backtested provider.
+# These are PRIORS. src/scoring/confidence.py shrinks them toward the hit-rate
+# actually measured from tracked outcomes, so they matter most early on and
+# progressively less as real data accumulates.
+#
+# Revised 2026-07-22 against the first real track record (244 alerts, 155 with
+# matured 1d outcomes, from evaluate.py against the production DB). The original
+# values were subjective guesses and one of them was catastrophically wrong:
+#
+#   ma_deal was 0.90 -- the HIGHEST prior in the table -- and measured
+#   0-for-35 across every horizon (p ~ 4e-6 against a coin flip), avg alpha
+#   -3.19% at 3d. Because it was also the top prior, it dominated the
+#   "confidence >= 0.80" bucket, which is exactly why that bucket showed a 0%
+#   hit rate. It is now 0.45 AND listed as directionally unreliable below.
+#
+# Measured 3d hit-rates behind the current values (n in brackets):
+#   regulatory_legal 75% [8]   other 53% [15]   analyst_rating 50% [6]
+#   partnership_contract 29% [34]   earnings_surprise 20% [15]
+#   insider_activity 20% [5]   ma_deal 0% [17]
+#
+# Deliberately NOT set equal to the measured rates: most buckets are n<20, and
+# the calibration layer already pulls toward the empirical number. These are
+# moved toward reality, not fitted to it.
 base_rates:
-  ma_deal: 0.90
-  earnings_surprise: 0.68
-  guidance_change: 0.65
   regulatory_legal: 0.60
+  earnings_surprise: 0.55
+  guidance_change: 0.55
   analyst_rating: 0.55
-  insider_activity: 0.55
-  partnership_contract: 0.55
   macro_sector: 0.50
-  other: 0.40
+  insider_activity: 0.48
+  partnership_contract: 0.48
+  ma_deal: 0.45
+  other: 0.45
 
-# Alerts fire when final confidence >= this threshold. Can be overridden by
-# ALERT_CONFIDENCE_THRESHOLD in .env (env takes precedence if set).
+# Alerts fire when final confidence >= this threshold. Applies to MEDIA items
+# (no exchange category). Can be overridden by ALERT_CONFIDENCE_THRESHOLD.
 alert_threshold: 0.70
+
+# Floor for HIGH-impact exchange filings. Until 2026-07-22 a HIGH tier meant
+# "always alert" and confidence was never consulted at all -- 94% of alerts took
+# that path, so the entire calibration loop was decorative. This is deliberately
+# permissive (a genuine catalyst shouldn't need a high directional prior to be
+# worth seeing) but it is a real floor: an event type whose measured hit-rate
+# decays below it now goes quiet automatically instead of alerting forever.
+high_tier_confidence_threshold: 0.35
+
+# Event types with a measured directional record bad enough that we do NOT claim
+# a direction for them, regardless of impact tier. These are still ingested,
+# classified and stored -- they simply don't produce an alert.
+# ma_deal: 0-for-35. Not noise; a systematic miss.
+directionally_unreliable_event_types:
+  - ma_deal
