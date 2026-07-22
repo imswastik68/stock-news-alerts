@@ -278,6 +278,7 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             event_type=article.event_type,
             window_hours=settings.dedup_window_hours,
             threshold=settings.dedup_similarity_threshold,
+            same_event_window_hours=settings.dedup_same_event_window_hours,
         ):
             logger.info(
                 "pipeline: suppressing likely-duplicate alert for %s: %r",
@@ -316,6 +317,7 @@ def _send_pending_alerts(session, settings) -> int:
             event_type=article.event_type,
             window_hours=settings.dedup_window_hours,
             threshold=settings.dedup_similarity_threshold,
+            same_event_window_hours=settings.dedup_same_event_window_hours,
         ):
             logger.info(
                 "pipeline: suppressing likely-duplicate pending alert for %s: %r",

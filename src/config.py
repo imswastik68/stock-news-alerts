@@ -46,6 +46,7 @@ class Settings:
     max_news_age_hours: int
     dedup_window_hours: float
     dedup_similarity_threshold: float
+    dedup_same_event_window_hours: float
     daily_summary_enabled: bool
     daily_summary_hour: int
 
@@ -107,6 +108,7 @@ def get_settings() -> Settings:
         max_news_age_hours=int(os.environ.get("MAX_NEWS_AGE_HOURS", "48")),
         dedup_window_hours=float(os.environ.get("DEDUP_WINDOW_HOURS", "3.0")),
         dedup_similarity_threshold=float(os.environ.get("DEDUP_SIMILARITY_THRESHOLD", "0.65")),
+        dedup_same_event_window_hours=float(os.environ.get("DEDUP_SAME_EVENT_WINDOW_HOURS", "24.0")),
         daily_summary_enabled=_bool_env("DAILY_SUMMARY_ENABLED", True),
         daily_summary_hour=int(os.environ.get("DAILY_SUMMARY_HOUR", "18")),
         db_path=os.environ.get("DB_PATH", "stock_news.db"),

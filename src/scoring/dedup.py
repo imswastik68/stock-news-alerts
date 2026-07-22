@@ -17,18 +17,31 @@ alerts (see tests/test_dedup.py): genuine duplicates scored 0.75-0.98 similarity
 materially different updates on the same evolving story scored 0.28-0.42, so a
 0.65 threshold separates them cleanly.
 
-Text similarity alone has one blind spot, confirmed live: the SAME order/deal
-re-surfaces (NSE-RSS best-effort copy vs BSE copy of one filing) and the LLM
-distils the thinner copy into a CONTENT-FREE headline — "Wins new order",
-"bags new order", "Wins order". Against the specific first alert ("Wins Rs 89.45
-cr order from ADI Shantigram Abode LLP") those score only 0.24-0.40, well under
-threshold, so a second, information-free alert went out — seen for CHAVDA,
-WELCORP, ARIS, GP Eco, Happy Square. So beyond text similarity we also suppress
-a candidate that (a) shares ticker + direction + event_type with a recent sent
-alert AND (b) carries no digit at all — a restatement with no figure adds nothing
-over the alert already sent for that same event. Crucially this leaves genuinely
-evolving updates alone: those always cite the new number (SOMANYCERA's "Rs 58.80
-cr" -> "Rs 75.80 cr in three entities"), so they keep a digit and still alert.
+Text similarity alone cannot catch a whole class of real duplicates, because the
+same filing can be *described* completely differently each time it re-surfaces
+(the NSE-RSS best-effort copy vs the BSE copy, or a re-filing). Two live cases:
+
+  - Figure-free restatements: "Wins Rs 89.45 cr order from ADI Shantigram Abode
+    LLP" then simply "Wins new order" — 0.24-0.40 similarity.
+  - Different metric each time: NESTLEIND's Q1 results went out THREE times in
+    13 minutes as "Reports Q1 net profit of Rs 9,751.2 cr...", "Reports Q1 FY27
+    net profit up 48% YoY to Rs 975.1 cr", and "Nestle India reports 25.4% sales
+    growth in Q1" — pairwise similarity 0.58 / 0.18 / 0.21, all under threshold.
+
+An earlier version of this module tried to target the first case narrowly (same
+ticker + event_type AND a headline with no digit). NESTLEIND shows why that was
+too narrow: every one of those three headlines carries figures, so none matched.
+
+The rule now is the simpler and stronger one: for the SAME ticker, the SAME
+event_type and the same direction, a second alert inside the window is the same
+event. A company reports Q1 earnings once; it does not have three different
+bullish earnings surprises in a quarter-hour. That window is deliberately longer
+than the text-similarity one (a re-filing can land hours later) and is what
+finally makes the ticker, not the wording, the thing dedup keys on.
+
+The trade-off is accepted deliberately: a genuinely distinct second event of the
+same type on the same ticker inside the window is suppressed. That is rare, and
+one missed follow-up costs far less than the repeated alerts it prevents.
 """
 
 from __future__ import annotations
@@ -43,14 +56,24 @@ from src.storage.models import Article
 
 DEFAULT_WINDOW_HOURS = 3.0
 DEFAULT_SIMILARITY_THRESHOLD = 0.65
+# Longer than the text window on purpose: a re-filing or a second source's copy
+# of the same results/order can land hours after the first, well outside the
+# 3h text window (NESTLEIND's three copies spanned 13 minutes, but nothing
+# guarantees that). Same ticker + same event_type is a strong enough signal to
+# justify looking back a full day.
+DEFAULT_SAME_EVENT_WINDOW_HOURS = 24.0
 
 
 def _normalize(text: str) -> str:
     return " ".join((text or "").lower().split())
 
 
-def _has_digit(text: str) -> bool:
-    return any(ch.isdigit() for ch in (text or ""))
+def _as_utc(dt: datetime | None) -> datetime | None:
+    """SQLite hands back naive datetimes even for timezone=True columns, so
+    normalize before any Python-side comparison."""
+    if dt is None:
+        return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def is_duplicate_of_recent_alert(
@@ -62,6 +85,7 @@ def is_duplicate_of_recent_alert(
     event_type: str | None = None,
     window_hours: float = DEFAULT_WINDOW_HOURS,
     threshold: float = DEFAULT_SIMILARITY_THRESHOLD,
+    same_event_window_hours: float = DEFAULT_SAME_EVENT_WINDOW_HOURS,
 ) -> bool:
     """True if a similar-enough alert (same direction, sent within the last
     window_hours) already went out. Compares the clean LLM headline, not the
@@ -69,13 +93,12 @@ def is_duplicate_of_recent_alert(
     near-identical across unrelated filings and would cause false positives.
 
     Two independent suppression paths, either one triggering a duplicate:
-      1. Text similarity >= threshold (cross-ticker / cross-exchange copies).
-      2. Same ticker + same event_type as a recent sent alert, AND the candidate
-         headline has no digit — a figure-free restatement ("Wins new order") of
-         an event already alerted for that ticker. Only applies when both ticker
-         and event_type are supplied; a headline WITH a number is never caught
-         this way, so genuinely evolving updates (which cite the new figure) are
-         preserved.
+      1. Text similarity >= threshold within window_hours — catches copies of the
+         same wording, including across tickers/exchanges.
+      2. Same ticker + same event_type within same_event_window_hours, whatever
+         the wording. This is what catches a filing the LLM described three
+         different ways (see the module docstring). Requires both ticker and
+         event_type; callers that pass neither get path 1 only.
 
     Anchored on OUR OWN send time (Article.created_at, i.e. "now"), not the
     exchange's published_at: the pipeline processes each cycle's articles
@@ -88,23 +111,34 @@ def is_duplicate_of_recent_alert(
     if not headline or not headline.strip():
         return False
 
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=window_hours)
-    stmt = select(Article.headline, Article.ticker, Article.event_type).where(
+    now = datetime.now(timezone.utc)
+    text_cutoff = now - timedelta(hours=window_hours)
+    same_event_cutoff = now - timedelta(hours=same_event_window_hours)
+    # Query spans whichever window reaches further back; each rule then applies
+    # its own cutoff below.
+    stmt = select(
+        Article.headline, Article.ticker, Article.event_type, Article.created_at
+    ).where(
         Article.alert_sent == True,  # noqa: E712
         Article.direction == direction,
-        Article.created_at >= cutoff,
+        Article.created_at >= min(text_cutoff, same_event_cutoff),
     )
     norm_new = _normalize(headline)
-    candidate_has_no_digit = not _has_digit(headline)
-    for existing_headline, existing_ticker, existing_event_type in session.execute(stmt):
-        if difflib.SequenceMatcher(None, norm_new, _normalize(existing_headline)).ratio() >= threshold:
-            return True
+    same_event_checkable = bool(ticker and event_type)
+    for existing_headline, existing_ticker, existing_event_type, created_at in session.execute(stmt):
+        created = _as_utc(created_at)
         if (
-            candidate_has_no_digit
-            and ticker
-            and event_type
+            same_event_checkable
             and existing_ticker == ticker
             and existing_event_type == event_type
+            and created is not None
+            and created >= same_event_cutoff
+        ):
+            return True
+        if (
+            created is not None
+            and created >= text_cutoff
+            and difflib.SequenceMatcher(None, norm_new, _normalize(existing_headline)).ratio() >= threshold
         ):
             return True
     return False

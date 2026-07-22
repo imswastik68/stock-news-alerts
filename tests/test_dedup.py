@@ -128,76 +128,74 @@ def test_empty_headline_never_flagged_duplicate(session):
     assert not is_duplicate_of_recent_alert(session, headline="", direction="bullish")
 
 
-# ── low-information restatement path (same ticker + event_type, no digit) ─────
-# The order/deal re-surfaces and the LLM distils the thinner copy into a
-# content-free headline ("Wins new order") that scores far below the text
-# threshold against the specific first alert. Confirmed live for CHAVDA,
-# WELCORP, ARIS, GP Eco, Happy Square.
+# ── same ticker + same event_type = same event, whatever the wording ─────────
+# The case that forced this rule: NESTLEIND's Q1 results went out THREE times in
+# 13 minutes, each describing a different metric from the one filing. Pairwise
+# similarity was 0.58 / 0.18 / 0.21 — all under threshold — and every headline
+# carried figures, so a narrower "figure-free restatement" rule missed them too.
 
-def test_no_digit_restatement_same_ticker_and_event_is_suppressed(session):
+_NESTLE = [
+    "Reports Q1 net profit of Rs 9,751.2 cr, up from Rs 6,592.3 cr YoY",
+    "Reports Q1 FY27 net profit up 48% YoY to Rs 975.1 cr",
+    "Nestle India reports 25.4% sales growth in Q1",
+]
+
+
+@pytest.mark.parametrize("second", _NESTLE[1:])
+def test_real_nestle_triplicate_is_suppressed(session, second):
+    _add_sent_alert(session, _NESTLE[0], ticker="NESTLEIND.NS", event_type="earnings_surprise")
+    assert is_duplicate_of_recent_alert(
+        session, headline=second, direction="bullish",
+        ticker="NESTLEIND.NS", event_type="earnings_surprise",
+    )
+
+
+def test_figure_free_restatement_still_suppressed(session):
+    # The earlier CHAVDA/WELCORP/ARIS case stays covered by the same rule.
     _add_sent_alert(
         session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
         ticker="CHAVDA.NS", event_type="partnership_contract",
     )
     assert is_duplicate_of_recent_alert(
-        session,
-        headline="Wins new order",  # no figure — adds nothing over the above
-        direction="bullish",
-        ticker="CHAVDA.NS",
-        event_type="partnership_contract",
-    )
-
-
-def test_no_digit_restatement_different_ticker_not_suppressed(session):
-    # Different company that happens to also just "win an order" is a real,
-    # separate alert — the ticker guard must protect it.
-    _add_sent_alert(
-        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
+        session, headline="Wins new order", direction="bullish",
         ticker="CHAVDA.NS", event_type="partnership_contract",
     )
+
+
+def test_same_event_type_on_a_different_ticker_still_alerts(session):
+    # Two different companies reporting earnings must both alert — the rule
+    # keys on the ticker, so this is the guard that keeps it from over-firing.
+    _add_sent_alert(session, _NESTLE[0], ticker="NESTLEIND.NS", event_type="earnings_surprise")
     assert not is_duplicate_of_recent_alert(
-        session,
-        headline="Wins new order",
-        direction="bullish",
-        ticker="WELCORP.NS",
-        event_type="partnership_contract",
+        session, headline="Reports Q1 profit up 12% YoY", direction="bullish",
+        ticker="HCLTECH.NS", event_type="earnings_surprise",
     )
 
 
-def test_no_digit_restatement_different_event_type_not_suppressed(session):
+def test_different_event_type_on_the_same_ticker_still_alerts(session):
+    # Results in the morning and an order win in the afternoon are two genuine
+    # events for one company; only the event_type separates them.
+    _add_sent_alert(session, _NESTLE[0], ticker="NESTLEIND.NS", event_type="earnings_surprise")
+    assert not is_duplicate_of_recent_alert(
+        session, headline="Wins Rs 400 cr supply contract", direction="bullish",
+        ticker="NESTLEIND.NS", event_type="partnership_contract",
+    )
+
+
+def test_same_event_suppression_expires_after_its_window(session):
+    old = datetime.now(timezone.utc) - timedelta(hours=30)  # > 24h window
     _add_sent_alert(
-        session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
-        ticker="CHAVDA.NS", event_type="partnership_contract",
+        session, _NESTLE[0], created_at=old,
+        ticker="NESTLEIND.NS", event_type="earnings_surprise",
     )
     assert not is_duplicate_of_recent_alert(
-        session,
-        headline="Board reshuffle announced",  # different event, no digit
-        direction="bullish",
-        ticker="CHAVDA.NS",
-        event_type="regulatory_legal",
+        session, headline=_NESTLE[1], direction="bullish",
+        ticker="NESTLEIND.NS", event_type="earnings_surprise",
     )
 
 
-def test_evolving_update_with_a_new_figure_still_alerts_even_on_same_ticker_event(session):
-    # The critical non-regression: a genuinely new update on the same ticker +
-    # event_type carries the new number, so it keeps a digit and must NOT be
-    # caught by the no-digit path (nor by text similarity, 0.64 < 0.65).
-    _add_sent_alert(
-        session, "To invest up to Rs 58.80 cr in Siravit Ceramics",
-        ticker="SOMANYCERA.NS", event_type="ma_deal",
-    )
-    assert not is_duplicate_of_recent_alert(
-        session,
-        headline="Approves investments of up to Rs 75.80 cr in three entities",
-        direction="bullish",
-        ticker="SOMANYCERA.NS",
-        event_type="ma_deal",
-    )
-
-
-def test_no_digit_path_requires_ticker_and_event_type(session):
-    # Without ticker/event_type (older callers), the no-digit path is inert and
-    # only text similarity applies — a no-digit candidate is NOT auto-suppressed.
+def test_same_event_path_requires_ticker_and_event_type(session):
+    # Callers passing neither fall back to text similarity alone.
     _add_sent_alert(
         session, "Wins Rs 89.45 cr order from ADI Shantigram Abode LLP",
         ticker="CHAVDA.NS", event_type="partnership_contract",
