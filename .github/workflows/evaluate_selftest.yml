@@ -27,6 +27,38 @@ jobs:
           key: news-db-nonexistent-key-forces-prefix-match
           restore-keys: news-db-
 
+      # Is BSE's bhavcopy actually reachable FROM A RUNNER? It was verified from
+      # a home connection, but Indian exchange sites routinely block datacenter
+      # IPs, and this one fails soft — so if it were blocked here, BSE-only
+      # scrips would silently stay unpriceable forever with nothing in the logs
+      # to say why. Checked explicitly rather than assumed.
+      - name: Check BSE bhavcopy reachability from this runner
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import warnings
+          warnings.filterwarnings("ignore")
+          from datetime import date, timedelta
+          from src.ingestion.bse_bhavcopy import fetch_bhavcopy
+
+          got = None
+          for back in range(1, 8):
+              d = date.today() - timedelta(days=back)
+              parsed = fetch_bhavcopy(d)
+              print(f"{d}: {'OK ' + str(len(parsed)) + ' scrips' if parsed else 'no data (weekend/holiday or blocked)'}")
+              if parsed and got is None:
+                  got = (d, parsed)
+          if got is None:
+              print("RESULT: FAIL — no bhavcopy retrievable from this runner in the last 7 days")
+              raise SystemExit(1)
+          d, parsed = got
+          # Scrips evaluate.py previously reported as permanently unpriceable.
+          for scrip in ["543254", "539016", "544574", "532933"]:
+              hit = parsed.get(scrip)
+              print(f"  {scrip}: {'close=' + str(hit[0]) if hit else 'ABSENT'}")
+          print("RESULT: OK — BSE bhavcopy is reachable from GitHub Actions")
+          PY
+
       # Outcome backlog: how many alerted rows are still waiting on a fill per
       # horizon. Reported before the track record because a large backlog is the
       # difference between "genuinely unpriceable" and "just not fetched yet" —
