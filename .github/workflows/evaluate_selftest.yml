@@ -94,6 +94,74 @@ jobs:
           session.close()
           PY
 
+      # The whole-period report mixes alerts sent BEFORE the 2026-07-22 gate fix
+      # with those sent after, so it can't answer "did the fix work". This splits
+      # on send time and also breaks down the confidence buckets, which is the
+      # only way to see whether the old confidence inversion is still live or is
+      # just pre-fix rows maturing.
+      - name: Pre/post-fix split and confidence-bucket composition
+        continue-on-error: true
+        run: |
+          if [ ! -f stock_news.db ]; then echo "No cached DB found."; exit 0; fi
+          python - <<'PY'
+          import warnings
+          warnings.filterwarnings("ignore")
+          from datetime import datetime, timezone
+          from sqlalchemy import select
+          from src.storage.db import get_session
+          from src.storage.models import Article
+          from evaluate import wilson_ci
+
+          FIX = datetime(2026, 7, 22, 5, 58, tzinfo=timezone.utc)  # dedup+gate live
+          s = get_session()
+
+          def hit(d, r):
+              return (d == "bullish" and r > 0) or (d == "bearish" and r < 0)
+
+          for horizon in ("ret_1d", "ret_3d"):
+              col = getattr(Article, horizon)
+              idx = getattr(Article, f"idx_{horizon}")
+              rows = list(s.execute(select(
+                  Article.created_at, Article.direction, Article.confidence,
+                  Article.event_type, col, idx,
+              ).where(
+                  Article.alert_sent == True, col.is_not(None),
+                  Article.direction != "neutral",
+              )))
+              print(f"\n===== {horizon} =====")
+              for label, sel in (
+                  ("PRE-fix ", [r for r in rows if (r[0].replace(tzinfo=timezone.utc) if r[0].tzinfo is None else r[0]) < FIX]),
+                  ("POST-fix", [r for r in rows if (r[0].replace(tzinfo=timezone.utc) if r[0].tzinfo is None else r[0]) >= FIX]),
+              ):
+                  if not sel:
+                      print(f"{label}: no rows"); continue
+                  n = len(sel)
+                  raw = sum(1 for r in sel if hit(r[1], r[4]))
+                  al = [(r[1], r[4] - r[5]) for r in sel if r[5] is not None]
+                  ah = sum(1 for d, a in al if hit(d, a))
+                  lo, hi = wilson_ci(ah, len(al)) if al else (0, 1)
+                  avg_alpha = sum(a for _, a in al) / len(al) if al else 0.0
+                  print(f"{label}: n={n:<4} raw={raw/n:.0%}  alpha={ah/len(al):.0%} [{lo:.0%}-{hi:.0%}]  avg_alpha={avg_alpha:+.2f}%")
+
+          # What is actually sitting in the high-confidence buckets?
+          print("\n===== conf>=0.70 composition (ret_1d) =====")
+          rows = list(s.execute(select(
+              Article.created_at, Article.event_type, Article.confidence,
+              Article.direction, Article.ret_1d,
+          ).where(
+              Article.alert_sent == True, Article.ret_1d.is_not(None),
+              Article.direction != "neutral", Article.confidence >= 0.70,
+          )))
+          from collections import Counter
+          c = Counter()
+          for created, et, conf, d, r in rows:
+              created = created.replace(tzinfo=timezone.utc) if created.tzinfo is None else created
+              c[(et, "post" if created >= FIX else "pre")] += 1
+          for (et, era), k in sorted(c.items(), key=lambda x: -x[1]):
+              print(f"  {et:<24} {era:<5} {k}")
+          s.close()
+          PY
+
       - name: Run evaluate.py at all three horizons
         run: |
           if [ ! -f stock_news.db ]; then
