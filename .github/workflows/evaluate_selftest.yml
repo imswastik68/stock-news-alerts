@@ -162,6 +162,18 @@ jobs:
           s.close()
           PY
 
+      # Upload the restored DB so hypotheses can be backtested locally instead of
+      # through a ~2-minute CI round-trip each iteration. Read-only: this job
+      # never saves the cache back, so it cannot race the live news-scan loop.
+      - name: Upload production DB for local analysis
+        continue-on-error: true
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-db
+          path: stock_news.db
+          retention-days: 3
+          if-no-files-found: warn
+
       - name: Run evaluate.py at all three horizons
         run: |
           if [ ! -f stock_news.db ]; then
