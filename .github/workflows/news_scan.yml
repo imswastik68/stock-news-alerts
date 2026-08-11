@@ -36,7 +36,11 @@ jobs:
       - name: Restore dedup DB
         uses: actions/cache/restore@v4
         with:
-          path: stock_news.db
+          path: |
+            stock_news.db
+            .symbol_master.json
+            .symbol_master_isin.json
+            .bse_scrip_isin.json
           key: news-db-${{ github.run_id }}
           restore-keys: news-db-
 
@@ -63,9 +67,17 @@ jobs:
           done
           echo "loop finished after $n scans"
 
+      # The symbol/ISIN caches ride along with the DB so a run never starts with
+      # a cold symbol list. Combined with the stale-cache fallback in
+      # symbol_master.py, a transient NSE archives outage can no longer freeze
+      # company names in as permanent, unpriceable tickers.
       - name: Save dedup DB
         if: always()
         uses: actions/cache/save@v4
         with:
-          path: stock_news.db
+          path: |
+            stock_news.db
+            .symbol_master.json
+            .symbol_master_isin.json
+            .bse_scrip_isin.json
           key: news-db-${{ github.run_id }}

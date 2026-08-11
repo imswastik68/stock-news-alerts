@@ -98,11 +98,15 @@ def _normalize(name: str) -> str:
     return " ".join(text.split())
 
 
-def _read_cache() -> dict[str, str] | None:
+def _read_cache(ignore_ttl: bool = False) -> dict[str, str] | None:
+    """Cached mapping, or None. With ignore_ttl the age check is skipped — used
+    only as a last resort when the download has already failed (see
+    _load_master): a stale symbol list is enormously better than no list, since
+    "no list" silently downgrades good tickers to unpriceable company names."""
     if not _CACHE_PATH.exists():
         return None
     try:
-        if time.time() - _CACHE_PATH.stat().st_mtime > _CACHE_TTL_SECONDS:
+        if not ignore_ttl and time.time() - _CACHE_PATH.stat().st_mtime > _CACHE_TTL_SECONDS:
             return None
         return json.loads(_CACHE_PATH.read_text())
     except Exception as exc:
@@ -165,6 +169,20 @@ def _load_master() -> dict[str, str]:
     mapping = cached if cached is not None else _download_master()
     if cached is None and mapping:
         _write_cache(mapping)
+
+    # Download failed AND the cache was missing/expired. Rather than operate
+    # with no symbol list at all — which makes every symbol look invalid and
+    # freezes company names in as permanent tickers (136 rows in production got
+    # stuck that way, 106 of them resolvable) — fall back to an expired cache if
+    # one is on disk. NSE's archives are genuinely flaky; a symbol list a few
+    # days stale is far more accurate than none.
+    if not mapping:
+        stale = _read_cache(ignore_ttl=True)
+        if stale:
+            logger.warning(
+                "symbol_master: download failed, using stale cache (%d symbols)", len(stale)
+            )
+            mapping = stale
 
     _name_to_symbol = mapping
     _valid_symbols = set(mapping.values())

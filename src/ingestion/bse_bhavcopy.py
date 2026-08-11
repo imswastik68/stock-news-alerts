@@ -191,6 +191,44 @@ def get_forward_return(
     return (target / base - 1) * 100
 
 
+def get_prior_return(
+    session: Session, ticker: str, before_dt: datetime | date, trading_days: int
+) -> float | None:
+    """% move over the `trading_days` sessions BEFORE `before_dt` for a BSE
+    scrip — the pre-event drift used by src/scoring/priced_in.py, for scrips
+    Yahoo can't price. None unless the full span is available, so a partial
+    window is never reported as if it were the whole thing."""
+    scrip = _scrip_of(ticker)
+    if scrip is None:
+        return None
+    before_date = before_dt.date() if isinstance(before_dt, datetime) else before_dt
+
+    # Walk back far enough to cover `trading_days` sessions plus weekends and a
+    # holiday run; each day is cached after the first fetch.
+    span = trading_days * 2 + 10
+    for offset in range(span + 1):
+        ensure_day_cached(session, before_date - timedelta(days=offset))
+
+    stmt = (
+        select(BseClose.trade_date, BseClose.close)
+        .where(
+            BseClose.scrip == scrip,
+            BseClose.trade_date <= before_date,
+            BseClose.trade_date >= before_date - timedelta(days=span),
+        )
+        .order_by(BseClose.trade_date.desc())
+        .limit(trading_days + 1)
+    )
+    rows = list(session.execute(stmt))
+    if len(rows) <= trading_days:
+        return None
+    end = rows[0][1]
+    start = rows[trading_days][1]
+    if start <= 0:
+        return None
+    return (end / start - 1) * 100
+
+
 def prune_old_days(session: Session, retain_days: int = _RETAIN_DAYS) -> int:
     """Drop cached closes older than the tracking window. Returns rows deleted."""
     cutoff = datetime.now().date() - timedelta(days=retain_days)

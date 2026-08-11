@@ -189,3 +189,46 @@ def test_end_to_end_sme_name_resolves_through_resolve_nse_symbol():
         assert symbol_master.resolve_nse_symbol("Chavda Infra Limited") == "CHAVDA"
         # main board still works too
         assert symbol_master.resolve_nse_symbol("Tata Capital Limited") == "TATACAP"
+
+
+# ── stale-cache fallback ─────────────────────────────────────────────────────
+# With no symbol list at all, is_valid_nse_symbol() says False for EVERY symbol
+# and resolve_nse_symbol() returns None for every name — so exchange_rss freezes
+# the company name in as a permanent, unpriceable ticker. 136 production rows
+# ended up stuck that way, 106 of them resolvable on a later attempt. An expired
+# cache is far better than nothing, so it is used when the download fails.
+
+def test_expired_cache_is_used_when_download_fails():
+    stale = {"TATA CAPITAL LIMITED": "TATACAP"}
+    with patch.object(symbol_master, "_download_master", return_value={}), \
+         patch.object(symbol_master, "_read_cache",
+                      side_effect=lambda ignore_ttl=False: stale if ignore_ttl else None), \
+         patch.object(symbol_master, "_write_cache"):
+        assert symbol_master.resolve_nse_symbol("Tata Capital Limited") == "TATACAP"
+
+
+def test_fresh_cache_still_wins_without_consulting_the_stale_path():
+    fresh = {"TATA CAPITAL LIMITED": "TATACAP"}
+    with patch.object(symbol_master, "_download_master") as dl, \
+         patch.object(symbol_master, "_read_cache", return_value=fresh), \
+         patch.object(symbol_master, "_write_cache"):
+        assert symbol_master.resolve_nse_symbol("Tata Capital Limited") == "TATACAP"
+    dl.assert_not_called()
+
+
+def test_no_cache_and_failed_download_still_degrades_gracefully():
+    with patch.object(symbol_master, "_download_master", return_value={}), \
+         patch.object(symbol_master, "_read_cache", return_value=None), \
+         patch.object(symbol_master, "_write_cache"):
+        assert symbol_master.resolve_nse_symbol("Tata Capital Limited") is None
+        assert symbol_master.is_master_available() is False
+
+
+def test_stale_fallback_makes_symbol_validation_work_again():
+    stale = {"TATA CAPITAL LIMITED": "TATACAP"}
+    with patch.object(symbol_master, "_download_master", return_value={}), \
+         patch.object(symbol_master, "_read_cache",
+                      side_effect=lambda ignore_ttl=False: stale if ignore_ttl else None), \
+         patch.object(symbol_master, "_write_cache"):
+        assert symbol_master.is_valid_nse_symbol("TATACAP") is True
+        assert symbol_master.is_master_available() is True

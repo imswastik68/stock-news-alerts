@@ -48,6 +48,20 @@ high_tier_confidence_threshold: 0.35
 # Event types with a measured directional record bad enough that we do NOT claim
 # a direction for them, regardless of impact tier. These are still ingested,
 # classified and stored -- they simply don't produce an alert.
-# ma_deal: 0-for-35. Not noise; a systematic miss.
+#   ma_deal:          0-for-35 when retired; still 4%/4%/7% at 1d/3d/5d on the
+#                     rows that had already matured. Not noise, a systematic miss.
+#   insider_activity: 31%/28%/30% at 1d/3d/5d (n=20-26 per horizon) -- below
+#                     chance at EVERY horizon, measured 2026-08-11. A promoter
+#                     buying or selling turns out to say little about the next
+#                     few days' direction.
 directionally_unreliable_event_types:
   - ma_deal
+  - insider_activity
+
+# Suppress a BULLISH alert when the stock has already risen this much over the
+# 5 sessions before the filing -- "buy the rumour, sell the news". Measured on
+# 371 matured alerts: bullish calls above +8% pre-drift hit 22% with -3.09% avg
+# alpha, versus 36% / -0.32% below it, and the effect held out of sample
+# (-3.07% in-sample vs -3.12% out-of-sample). See src/scoring/priced_in.py for
+# the full evidence. Set to 0 to disable.
+priced_in_drift_threshold_pct: 8.0

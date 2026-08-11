@@ -21,11 +21,13 @@ from src.ingestion.common import RawArticle
 from src.ingestion.exchange_rss import fetch_bse_rss, fetch_nse_rss
 from src.ingestion.nse_announcements import fetch_nse_market_wide
 from src.ingestion.pdf_extract import extract_pdf_text
+from src.ingestion.ticker_repair import repair_unresolved_tickers
 from src.scoring.confidence import BacktestedConfidenceProvider
 from src.scoring.dedup import is_duplicate_of_recent_alert
 from src.scoring.impact import DROP, HIGH, category_impact
 from src.scoring.market_data import get_quote
 from src.scoring.outcomes import track_outcomes
+from src.scoring.priced_in import is_priced_in
 from src.scoring.source_quality import get_source_quality, is_directional_material_alert
 from src.storage.db import (
     article_exists,
@@ -285,6 +287,17 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
                 raw.ticker, display_headline[:80],
             )
             mark_alert_sent(session, article.id)
+        elif is_priced_in(
+            session,
+            ticker=article.ticker,
+            direction=article.direction,
+            published_at=article.published_at,
+            threshold_pct=settings.priced_in_drift_threshold_pct,
+        ):
+            # Stock already ran up before the filing — measured to hit 22% with
+            # -3.09% avg alpha (src/scoring/priced_in.py). Stored and marked
+            # sent so it isn't retried, just not pushed.
+            mark_alert_sent(session, article.id)
         else:
             try:
                 if send_alert(article, quote=get_quote(article.ticker)):
@@ -323,6 +336,15 @@ def _send_pending_alerts(session, settings) -> int:
                 "pipeline: suppressing likely-duplicate pending alert for %s: %r",
                 article.ticker, article.headline[:80],
             )
+            mark_alert_sent(session, article.id)
+            continue
+        if is_priced_in(
+            session,
+            ticker=article.ticker,
+            direction=article.direction,
+            published_at=article.published_at,
+            threshold_pct=settings.priced_in_drift_threshold_pct,
+        ):
             mark_alert_sent(session, article.id)
             continue
         try:
@@ -373,6 +395,13 @@ def run_pipeline() -> dict:
         # evaluate.py's coverage stats — every one of them actually returns a
         # real forward return when tested with its real timestamp. 60 clears
         # a realistic backlog in one cycle (~6-24s) with headroom.
+        # Rows whose ticker was frozen as a company name by a transient symbol-
+        # master outage can never be priced. Retry them BEFORE tracking outcomes
+        # so a repaired ticker gets its return filled in the same cycle.
+        try:
+            repair_unresolved_tickers(session)
+        except Exception as exc:
+            logger.error("pipeline: ticker repair crashed: %s", exc)
         try:
             track_outcomes(session, limit=60)
         except Exception as exc:

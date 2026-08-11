@@ -99,6 +99,37 @@ def get_quote(ticker: str) -> dict | None:
         return None
 
 
+def get_prior_return(ticker: str, before_dt: datetime | date, trading_days: int) -> float | None:
+    """% move over the `trading_days` sessions immediately BEFORE `before_dt` —
+    i.e. how far the stock had already run when the filing landed.
+
+    This is the mirror of get_forward_return and exists for the priced-in check
+    in src/scoring/priced_in.py. None when the cached window doesn't reach far
+    enough back to cover the full pre-event span, rather than silently measuring
+    a shorter one (the same failure that once fabricated forward returns)."""
+    from_date = before_dt.date() if isinstance(before_dt, datetime) else before_dt
+    closes = _closes(ticker)
+    if closes is None or len(closes) == 0:
+        return None
+
+    dates = [ts.date() if hasattr(ts, "date") else ts for ts in closes.index]
+    end_idx = next((i for i, d in enumerate(dates) if d >= from_date), None)
+    if end_idx is None:
+        return None
+    start_idx = end_idx - trading_days
+    if start_idx < 0:
+        return None  # window doesn't cover the full pre-event span
+
+    try:
+        start = float(closes.iloc[start_idx])
+        end = float(closes.iloc[end_idx])
+    except Exception:
+        return None
+    if start <= 0:
+        return None
+    return (end / start - 1) * 100
+
+
 def get_forward_return(ticker: str, from_dt: datetime | date, trading_days: int) -> float | None:
     """% return from the first close on/after `from_dt` to `trading_days` trading
     bars later. None if the data isn't there yet (not matured), `from_dt` is

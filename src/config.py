@@ -62,9 +62,12 @@ class Settings:
     high_tier_confidence_threshold: float = 0.35
     # Event types whose measured directional record is bad enough not to alert on.
     directionally_unreliable_event_types: frozenset[str] = frozenset()
+    # Bullish alerts are suppressed above this pre-filing 5-session run-up
+    # (see src/scoring/priced_in.py). 0 disables the check.
+    priced_in_drift_threshold_pct: float = 8.0
 
 
-def _load_confidence_table() -> tuple[dict[str, float], float, float, frozenset[str]]:
+def _load_confidence_table() -> tuple[dict[str, float], float, float, frozenset[str], float]:
     path = ROOT_DIR / "confidence_table.yaml"
     with open(path) as f:
         raw = yaml.safe_load(f) or {}
@@ -72,7 +75,8 @@ def _load_confidence_table() -> tuple[dict[str, float], float, float, frozenset[
     yaml_threshold = float(raw.get("alert_threshold", 0.70))
     high_tier_threshold = float(raw.get("high_tier_confidence_threshold", 0.35))
     unreliable = frozenset(raw.get("directionally_unreliable_event_types", []) or [])
-    return base_rates, yaml_threshold, high_tier_threshold, unreliable
+    priced_in = float(raw.get("priced_in_drift_threshold_pct", 8.0))
+    return base_rates, yaml_threshold, high_tier_threshold, unreliable, priced_in
 
 
 _settings: Settings | None = None
@@ -83,7 +87,7 @@ def get_settings() -> Settings:
     if _settings is not None:
         return _settings
 
-    base_rates, yaml_threshold, high_tier_threshold, unreliable = _load_confidence_table()
+    base_rates, yaml_threshold, high_tier_threshold, unreliable, priced_in = _load_confidence_table()
     env_threshold = os.environ.get("ALERT_CONFIDENCE_THRESHOLD")
     threshold = float(env_threshold) if env_threshold else yaml_threshold
     env_high_tier = os.environ.get("HIGH_TIER_CONFIDENCE_THRESHOLD")
@@ -117,6 +121,9 @@ def get_settings() -> Settings:
         confidence_base_rates=base_rates,
         high_tier_confidence_threshold=high_tier_threshold,
         directionally_unreliable_event_types=unreliable,
+        priced_in_drift_threshold_pct=float(
+            os.environ.get("PRICED_IN_DRIFT_THRESHOLD_PCT", priced_in)
+        ),
     )
     return _settings
 
