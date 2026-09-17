@@ -20,12 +20,36 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      # This path list must stay byte-identical to the save step in
+      # news_scan.yml. actions/cache derives a cache *version* from the path
+      # list, so a restore with a different list silently matches nothing even
+      # when the key prefix is right. That happened: news_scan started saving
+      # four paths on 2026-08-12 while this restored one, and every selftest
+      # from then to 2026-09-17 reported "No cached DB found" and exited 0 —
+      # a green run that measured nothing.
       - name: Restore production DB (read-only)
         uses: actions/cache/restore@v4
         with:
-          path: stock_news.db
+          path: |
+            stock_news.db
+            .symbol_master.json
+            .symbol_master_isin.json
+            .bse_scrip_isin.json
           key: news-db-nonexistent-key-forces-prefix-match
           restore-keys: news-db-
+
+      # A diagnostic that cannot diagnose must be loud. Every step below guards
+      # on the DB existing and exits 0 without it, so a failed restore produced
+      # a green run reporting nothing at all — the failure mode above went
+      # unnoticed for five weeks precisely because of this.
+      - name: Fail loudly if the production DB did not restore
+        run: |
+          if [ ! -f stock_news.db ]; then
+            echo "::error::No production DB restored. The cache key prefix or the"
+            echo "::error::path list no longer matches news_scan.yml's save step."
+            exit 1
+          fi
+          ls -la stock_news.db
 
       # Is BSE's bhavcopy actually reachable FROM A RUNNER? It was verified from
       # a home connection, but Indian exchange sites routinely block datacenter
