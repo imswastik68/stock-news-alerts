@@ -194,23 +194,48 @@ makes the open→close question answerable.
 8. ~~**Stop neutral-ing genuine catalysts.**~~ **DONE** — verified live on eight
    filing shapes, all eight correct, including the two that must *stay* neutral
    (reaffirmation, end-of-term retirement).
-9. **Re-open the `analyst_rating` / `credit_rating` retirement.** Still open, and
-   now answerable: `credit_rating` inherits the retirement because the original
-   measurement was taken on that population (43 of 46 delivered `analyst_rating`
-   alerts were rating-agency filings). With reaffirmations no longer alerting,
-   the bucket can be measured on rating *actions* alone for the first time.
-   Until then a genuine downgrade is stored but not pushed.
+9. **Re-open the `analyst_rating` / `credit_rating` retirement.** Still open, now
+   **collecting** (`26db512`). `credit_rating` inherits the retirement because
+   the original measurement was taken on that population (43 of 46 delivered
+   `analyst_rating` alerts were rating-agency filings). With reaffirmations no
+   longer alerting, the bucket can be measured on rating *actions* alone for the
+   first time. A genuine downgrade is still stored and not pushed.
+   **Read it with `python evaluate.py --shadow --horizon ret_3d`.**
 10. **Revisit `min_materiality_score` (0.65) — with measurement, not by feel.**
     In live testing an auditor resignation and a plant fire both scored 0.60, so
-    they store but do not push. Both look like real catalysts. Do not move this
-    until P0.4 is done: changing the gate mid-re-baseline confounds it.
+    they store but do not push. Both look like real catalysts. Same `--shadow`
+    report. Do not move this until P0.4 is done: changing the gate
+    mid-re-baseline confounds it.
+
+> **Both of the above were unmeasurable until `26db512`.** `track_outcomes()`
+> only ever selected `alert_sent = True`, and a withheld filing never sets that
+> flag — so the evidence these two items need was precisely the evidence not
+> being collected, and waiting would have produced nothing. Demonstrated live:
+> a 3-article cycle classified three filings and withheld all three (one
+> `ma_deal`, two `credit_rating`); the alerted pass recorded 0 values, the
+> shadow pass recorded 10. Withheld rows keep `alert_sent = False`, so they feed
+> no calibration and enter no reported track record — starting to *act* on them
+> stays a deliberate decision.
 
 ### P2 — Trade the asymmetry, once the sample supports it
 
-11. **Add `ret_intraday` (open→close) as a first-class horizon.** Currently the
-    only way to see the most promising result in this document is an ad-hoc
-    script. It belongs in `outcomes.py` next to `ret_1d`. Independent of the
-    P0.4 re-baseline, so it can be built now and will simply start collecting.
+11. ~~**Add `ret_intraday` (open→close) as a first-class horizon.**~~
+    **NOT NEEDED — it already exists under another name.**
+
+    > **Correction (2026-09-17).** This item assumed open→close was only
+    > available via an ad-hoc script. It is not. For a row whose `entry_basis`
+    > is `next_open`, `ret_1d` *is* the open→close return of the first session
+    > after the news: `get_forward_return_from_open(..., trading_days=1)` enters
+    > at `open[next]` and exits at `close[next]` — the same bar. Verified
+    > numerically against a constructed OHLC series. `evaluate.py` already
+    > breaks every stat down by `entry_basis` and labels tradability, so the
+    > "most promising result in this document" is readable today with
+    > `python evaluate.py --horizon ret_1d` and reading the `next_open` row.
+    > Adding a `ret_intraday` column would duplicate `ret_1d` and create two
+    > columns that must agree. What this needs is **sample size, not schema** —
+    > which is what P0 and P1 now supply. Caveat: on a `next_close` row
+    > (BSE-only scrip, no open price) `ret_1d` is close→close instead, which is
+    > exactly why the entry-basis split must not be collapsed.
 12. **Re-test bearish open→close at n≥50.** If it holds near +0.79%, bearish
     after-hours alerts get a real trade plan (short at the open, cover at the
     close) instead of today's "do not short this alone". The P0 fix plus the P1

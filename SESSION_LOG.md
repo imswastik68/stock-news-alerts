@@ -49,22 +49,26 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
   in the prior 5 sessions — validated out-of-sample), `dedup.py` (same
   ticker + event_type + direction within 24h = same event, regardless of
   wording), `outcomes.py` (tracks forward returns per alert, yfinance first
-  then `bse_bhavcopy` fallback), `market_data.py` (quotes, prior/forward
-  return helpers, and `entry_basis_for()` — whether an alert's measured entry
-  price was one a trader could actually have been filled at),
-  `conviction.py` (the one out-of-sample-validated setup, and the entry/exit
-  plan shown in the alert).
+  then `bse_bhavcopy` fallback; a second pass also measures the filings we
+  withheld, so blocked buckets can be re-decided on evidence), `market_data.py`
+  (quotes, prior/forward return helpers, and `entry_basis_for()` — whether an
+  alert's measured entry price was one a trader could actually have been filled
+  at), `conviction.py` (the one out-of-sample-validated setup, and the
+  entry/exit plan shown in the alert).
 - **Pipeline** (`src/pipeline.py`): one cycle = gather articles → dedup →
   classify → score/gate → alert → repair frozen tickers → track outcomes →
-  prune cached BSE closes. Every article is wrapped in its own try/except;
-  one bad article never aborts the cycle.
+  track shadow outcomes → prune cached BSE closes. Every article is wrapped in
+  its own try/except; one bad article never aborts the cycle.
 - **Config**: `src/config.py` + `confidence_table.yaml` (priors, gate
   thresholds, per-event-type calibration — tune here, not in code).
 - **Evaluation**: `evaluate.py` computes the live track record (hit-rate,
   alpha vs index, Wilson CIs, coverage) from the production DB. Run this to
   check "is the system actually working," not the pipeline logs. It also
   breaks the record down by `entry_basis` — if the edge only appears on rows
-  whose entry price was never tradable, there is no edge.
+  whose entry price was never tradable, there is no edge. `--shadow` reports
+  the filings that were classified but never sent (blocked event types,
+  sub-materiality rows): a counterfactual record, strictly partitioned from the
+  delivered one and feeding no calibration.
 
 ## Known structural limits (not bugs, just ceilings)
 
@@ -89,7 +93,57 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
 
 ## Log
 
-### 2026-09-17 (latest) — The system was reading 20 filings a day
+### 2026-09-17 (latest) — The withheld filings were never being measured
+
+**The finding.** `track_outcomes()` selected only `alert_sent = True`. A filing
+we classify but decline to alert on — a blocked event type, or one under
+`min_materiality_score` — never sets that flag, so it never got a forward
+return. Two of the open decisions in `ROADMAP.md` therefore could not be
+resolved by waiting, because the evidence they need was the evidence that was
+not being collected:
+
+- **P1.9**, re-opening the `credit_rating` retirement. 568 of 987
+  negative-catalyst filings land in that bucket and not one had a measured
+  outcome.
+- **P1.10**, moving `min_materiality_score` off 0.65. An auditor resignation
+  scores 0.60 and was invisible either way.
+
+Demonstrated live rather than argued: a 3-article cycle against a scratch DB
+classified three filings and withheld **all three** (one `ma_deal`, two
+`credit_rating` — both directionally blocked). The alerted pass recorded 0
+values; the shadow pass recorded 10 against live Yahoo/NIFTY data.
+
+**Fixed in `26db512` + `0050574`.**
+
+- `track_shadow_outcomes()` fills the same return columns for classified,
+  directional, non-alerted rows. Runs after the alerted pass on its own budget
+  so it can never starve the real track record, newest-first so the tail of
+  unpriceable BSE scrips can't eat the budget every cycle.
+- `evaluate.py --shadow` reports them, reusing every existing breakdown.
+- **Changes no alerting behaviour by construction.** `alert_sent` stays
+  `False`, and both consumers of those columns — `get_hit_rate_stats()`, which
+  feeds confidence calibration, and `evaluate.py`'s default report — filter on
+  `alert_sent = True`. Tested explicitly, not assumed. Acting on a withheld
+  bucket remains a deliberate decision on the evidence.
+
+**Verified.** 234 tests (12 new). Full pipeline cycle clean. End-to-end run on
+a scratch DB confirming the alerted/shadow split, real forward returns, and
+`alert_sent` unchanged.
+
+**A roadmap item was retracted, not shipped.** P2.11 asked for a `ret_intraday`
+(open→close) horizon. It already exists: for an `entry_basis = next_open` row,
+`ret_1d` *is* open→close — `get_forward_return_from_open(..., trading_days=1)`
+enters at `open[next]` and exits at `close[next]`, the same bar. Verified
+numerically against a constructed OHLC series. `evaluate.py` already splits by
+`entry_basis`, so the result is readable today. Adding the column would have
+duplicated `ret_1d`. That lead needs sample size, not schema.
+
+**Still open.** Everything time-gated is still time-gated: P0.4's re-baseline
+needs ~a fortnight of post-fix history, and P1.9/P1.10 need that history to
+accumulate in the shadow set before either can be decided. `credit_rating`
+still does not alert. `min_materiality_score` is still 0.65.
+
+### 2026-09-17 — The system was reading 20 filings a day
 
 **The finding.** Gemini's free tier allows **twenty requests per day** for
 `gemini-3.5-flash`. Read verbatim from its own 429:
