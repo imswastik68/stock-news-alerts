@@ -116,9 +116,7 @@ def _index_forward_return(published_at, tdays: int, basis: str) -> float | None:
     return get_forward_return(_BENCHMARK_TICKER, published_at, tdays)
 
 
-def track_outcomes(session: Session, limit: int = 60) -> int:
-    """Fill in matured forward returns (stock + index) for alerted articles.
-    Returns how many individual column values were recorded this call."""
+def _track(session: Session, limit: int, shadow: bool) -> int:
     now = datetime.now(timezone.utc)
     oldest = now - timedelta(days=_MAX_TRACK_AGE_DAYS)
     recorded = 0
@@ -129,19 +127,27 @@ def track_outcomes(session: Session, limit: int = 60) -> int:
         column = getattr(Article, col)
         idx_column = getattr(Article, idx_col)
         cutoff = now - timedelta(days=min_age_days)
-        stmt = (
-            select(Article)
-            .where(
-                and_(
-                    Article.alert_sent == True,  # noqa: E712
-                    Article.published_at <= cutoff,
-                    Article.published_at >= oldest,
-                    or_(column.is_(None), idx_column.is_(None)),
-                )
-            )
-            .limit(limit - recorded)
-        )
-        for article in session.execute(stmt).scalars():
+        where = [
+            Article.published_at <= cutoff,
+            Article.published_at >= oldest,
+            or_(column.is_(None), idx_column.is_(None)),
+        ]
+        if shadow:
+            where += [
+                Article.alert_sent == False,  # noqa: E712
+                Article.direction != "neutral",
+                Article.event_type != "classification_failed",
+            ]
+        else:
+            where.append(Article.alert_sent == True)  # noqa: E712
+        stmt = select(Article).where(and_(*where))
+        if shadow:
+            # Newest first. Unlike the alerted set, this one carries a long tail
+            # of scrips neither Yahoo nor bhavcopy can ever price; in arbitrary
+            # order those re-select every cycle and eat the whole budget, so
+            # today's measurable rows would never be reached.
+            stmt = stmt.order_by(Article.published_at.desc())
+        for article in session.execute(stmt.limit(limit - recorded)).scalars():
             # A stored basis wins over a freshly derived one: the stock and index
             # legs are filled on independent passes, and the index must use
             # whatever the stock leg actually resolved to (bhavcopy can downgrade
@@ -167,6 +173,43 @@ def track_outcomes(session: Session, limit: int = 60) -> int:
                 break
         session.commit()
 
+    return recorded
+
+
+def track_outcomes(session: Session, limit: int = 60) -> int:
+    """Fill in matured forward returns (stock + index) for alerted articles.
+    Returns how many individual column values were recorded this call."""
+    recorded = _track(session, limit, shadow=False)
     if recorded:
         logger.info("outcomes: recorded %d forward-return value(s)", recorded)
+    return recorded
+
+
+def track_shadow_outcomes(session: Session, limit: int = 40) -> int:
+    """Same, for classified directional filings we chose NOT to alert on.
+
+    This is the counterfactual track record, and without it several deferred
+    decisions are simply unanswerable no matter how long we wait:
+
+      - `credit_rating` is blocked in confidence_table.yaml, so it never sets
+        alert_sent, so track_outcomes never measured it — and re-opening that
+        retirement (ROADMAP P1.9) needs exactly the returns it was not
+        collecting. 568 of 987 negative-catalyst filings sit in that bucket.
+      - Rows that clear everything except `min_materiality_score` (ROADMAP
+        P1.10) have the same problem: an auditor resignation scoring 0.60 is
+        invisible forever, so there is no evidence on which to move the gate.
+
+    Safe by construction: alert_sent stays False, and every consumer of these
+    columns — get_hit_rate_stats() and evaluate.py — filters on
+    alert_sent == True. So these rows feed no calibration and enter no reported
+    hit-rate. They are measured and otherwise inert, which is the point: a
+    decision to start alerting on them has to be made deliberately, on the
+    evidence, not drift in because a column got populated.
+
+    Runs after track_outcomes with its own smaller budget, so measuring the
+    counterfactual can never starve the real track record.
+    """
+    recorded = _track(session, limit, shadow=True)
+    if recorded:
+        logger.info("outcomes: recorded %d shadow forward-return value(s)", recorded)
     return recorded

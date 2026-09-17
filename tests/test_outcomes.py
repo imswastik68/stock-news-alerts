@@ -17,7 +17,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.scoring.outcomes import entry_basis_for, track_outcomes
+from src.scoring.outcomes import entry_basis_for, track_outcomes, track_shadow_outcomes
 from src.storage.db import save_article, mark_alert_sent
 from src.storage.models import Base
 
@@ -262,3 +262,128 @@ def test_stored_basis_wins_over_a_freshly_derived_one_on_the_backfill_pass(sessi
     session.refresh(a)
     assert a.idx_ret_1d == 1.0
     open_fetch.assert_not_called()
+
+
+# --- Shadow tracking -------------------------------------------------------
+#
+# Filings we classify but deliberately don't alert on (a blocked event type, or
+# one that misses min_materiality_score) never set alert_sent, so track_outcomes
+# never measured them. That made ROADMAP P1.9/P1.10 unanswerable by waiting:
+# the evidence needed to re-open those decisions was the evidence not being
+# collected. track_shadow_outcomes() measures them WITHOUT making them alerts.
+
+
+def _add_unalerted(session, ticker, event_type="credit_rating", direction="bearish",
+                   published_days_ago=6):
+    published_at = (datetime.now(timezone.utc) - timedelta(days=published_days_ago)).replace(
+        hour=_INTRADAY_UTC_HOUR, minute=0, second=0, microsecond=0
+    )
+    return save_article(
+        session, ticker=ticker, headline=f"{ticker} headline", url=f"u-{ticker}",
+        source="nse_announcements", published_at=published_at, category="Rating",
+        impact_tier="high", event_type=event_type, direction=direction, confidence=0.7,
+        materiality_score=0.7, impact_horizon="1_3_days", source_quality=1.0,
+        is_material=True, reasoning="x",
+    )
+
+
+def test_a_blocked_event_type_is_never_measured_by_the_alerted_pass(session):
+    # The regression this exists for: credit_rating is directionally blocked, so
+    # alert_sent stays False and the normal pass cannot see it at all.
+    a = _add_unalerted(session, "RATED.NS")
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=lambda t, p, d: 2.0):
+        track_outcomes(session, limit=60)
+
+    session.refresh(a)
+    assert a.ret_1d is None
+
+
+def test_shadow_tracking_measures_the_filings_we_chose_not_to_alert_on(session):
+    a = _add_unalerted(session, "RATED.NS")
+
+    def fake(ticker, published_at, tdays):
+        return 1.0 if ticker == "^NSEI" else -3.0
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=fake):
+        recorded = track_shadow_outcomes(session, limit=40)
+
+    session.refresh(a)
+    assert a.ret_1d == -3.0
+    assert a.idx_ret_1d == 1.0
+    assert recorded >= 2
+
+
+def test_shadow_tracking_does_not_turn_the_row_into_an_alert(session):
+    # The whole safety argument rests on alert_sent staying False: that is what
+    # keeps these rows out of calibration and out of the reported track record.
+    a = _add_unalerted(session, "RATED.NS")
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=lambda t, p, d: 2.0):
+        track_shadow_outcomes(session, limit=40)
+
+    session.refresh(a)
+    assert a.alert_sent is False
+    assert a.ret_1d is not None
+
+
+def test_shadow_measured_rows_stay_out_of_the_calibration_stats(session):
+    # get_hit_rate_stats feeds BacktestedConfidenceProvider, which sets the
+    # confidence that decides what alerts. If a shadow row leaked in here it
+    # would change live alerting behaviour as a side effect of measurement.
+    from src.storage.db import get_hit_rate_stats
+
+    a = _add_unalerted(session, "RATED.NS")
+    a.ret_3d = -5.0
+    session.commit()
+
+    assert get_hit_rate_stats(session, horizon="ret_3d") == {}
+
+
+def test_shadow_tracking_skips_neutral_and_unclassified_rows(session):
+    # A neutral row makes no directional claim, so there is nothing to score it
+    # against; a failed classification has no claim at all.
+    neutral = _add_unalerted(session, "NEUT.NS", direction="neutral")
+    failed = _add_unalerted(session, "FAIL.NS", event_type="classification_failed")
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=lambda t, p, d: 2.0):
+        track_shadow_outcomes(session, limit=40)
+
+    session.refresh(neutral)
+    session.refresh(failed)
+    assert neutral.ret_1d is None
+    assert failed.ret_1d is None
+
+
+def test_shadow_tracking_leaves_already_alerted_rows_to_the_normal_pass(session):
+    # No double-counting: the two passes must partition the rows, not overlap.
+    alerted = _add(session, "SENT.NS")
+    fetched = []
+
+    def fake(ticker, published_at, tdays):
+        fetched.append(ticker)
+        return 2.0
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=fake):
+        track_shadow_outcomes(session, limit=40)
+
+    session.refresh(alerted)
+    assert alerted.ret_1d is None
+    assert "SENT.NS" not in fetched
+
+
+def test_shadow_tracking_takes_the_newest_rows_first(session):
+    # A permanent backlog of unpriceable old scrips must not be able to consume
+    # the budget every cycle and starve today's measurable filings.
+    _add_unalerted(session, "OLD.NS", published_days_ago=18)
+    _add_unalerted(session, "NEW.NS", published_days_ago=2)
+    fetched = []
+
+    def fake(ticker, published_at, tdays):
+        fetched.append(ticker)
+        return None  # nothing is priceable, so nothing gets written off
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=fake):
+        track_shadow_outcomes(session, limit=1)
+
+    assert fetched and fetched[0] == "NEW.NS"

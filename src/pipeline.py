@@ -31,7 +31,7 @@ from src.scoring.confidence import BacktestedConfidenceProvider
 from src.scoring.dedup import is_duplicate_of_recent_alert
 from src.scoring.impact import DROP, HIGH, category_impact
 from src.scoring.market_data import get_quote
-from src.scoring.outcomes import track_outcomes
+from src.scoring.outcomes import track_outcomes, track_shadow_outcomes
 from src.scoring.priced_in import is_priced_in
 from src.scoring.source_quality import get_source_quality, is_directional_material_alert
 from src.storage.db import (
@@ -467,6 +467,14 @@ def run_pipeline() -> dict:
             track_outcomes(session, limit=60)
         except Exception as exc:
             logger.error("pipeline: outcome tracking crashed: %s", exc)
+        # Strictly second, on its own budget: the filings we classified but chose
+        # not to alert on. Feeds nothing — it exists so the deferred calls in
+        # ROADMAP P1.9/P1.10 have evidence to be decided on. See
+        # track_shadow_outcomes().
+        try:
+            track_shadow_outcomes(session, limit=40)
+        except Exception as exc:
+            logger.error("pipeline: shadow outcome tracking crashed: %s", exc)
         # Cached BSE closes are only needed inside the tracking window; without
         # pruning they'd grow ~4900 rows per trading day forever inside the DB
         # that GitHub Actions carries between runs.
