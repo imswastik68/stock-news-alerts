@@ -31,8 +31,14 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
   scrips to NSE tickers (strict exact-match, no fuzzy matching — see its
   module docstring for why). `bse_bhavcopy.py` is the pricing fallback for
   BSE-only scrips with zero Yahoo Finance data.
-- **Classification**: `src/classification/classifier.py` — Gemini Flash
-  primary, Groq/Ollama fallback. Returns event_type, direction, confidence,
+- **Classification**: `src/classification/classifier.py` — **Groq
+  (`openai/gpt-oss-120b`) primary**, Gemini then Ollama as fallbacks. Backend
+  order is the throughput ceiling of the whole system, not a detail: Gemini's
+  free tier is 20 requests/day against Groq's 1000, and while Gemini led, 77% of
+  filings were never classified. Groq is paced against its 8000 tokens/min
+  ceiling. A failed classification is retried up to 3 times
+  (`classify_attempts`) instead of being written off, and the reason is stored
+  in `classification_error`. Returns event_type, direction, confidence,
   materiality, impact_horizon.
 - **Scoring/gating** (`src/scoring/`): `confidence.py` (Bayesian shrinkage of
   the LLM's confidence toward measured hit-rates per event_type, K=15),
@@ -71,10 +77,80 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
 - NSE archive endpoints (`nsearchives.nseindia.com`) are genuinely flaky.
   The stale-cache fallback in `symbol_master.py` and the retry pass in
   `ticker_repair.py` exist because of this, not hypothetically.
+- **Free-tier LLM quota is the throughput ceiling.** Groq allows 1000
+  requests/day and 8000 tokens/min; a filing costs ~1.7K tokens, so sustained
+  capacity is ~4 filings/min and ~700/day at the current cycle cadence. That
+  covers today's ~200 filings/day with headroom, but it is the number that
+  breaks first if ingestion widens. The structural fix is batching several
+  filings per call (~900 of the ~1700 tokens is the system prompt, so 8 per call
+  is ~2.5× more filings per token), not another key.
 
 ---
 
 ## Log
+
+### 2026-09-17 (latest) — The system was reading 20 filings a day
+
+**The finding.** Gemini's free tier allows **twenty requests per day** for
+`gemini-3.5-flash`. Read verbatim from its own 429:
+
+> Quota exceeded for metric: generate_content_free_tier_requests,
+> **limit: 20**, model: gemini-3.5-flash
+> quotaId: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`
+
+Against 150–230 filings arriving daily, that is why 5223 of 6820 ingested
+articles (77%) were stored as `classification_failed`. It also explains the
+07:00 UTC dip in the failure histogram that `ROADMAP.md` called "inconsistent
+with a simple daily cap": 07:00 UTC is midnight Pacific, when the quota resets.
+
+Nothing caught the overflow, because the Groq fallback pointed at
+`llama-3.3-70b-versatile` long after Groq decommissioned it — every call
+returned 404 `model_not_found`, logged at DEBUG while production runs at INFO.
+The fallback read as configured while doing nothing.
+
+**ROADMAP.md was wrong on one point**, corrected there: it said the per-cycle
+cap was not binding. It was binding on *every* cycle. The cap was applied to the
+whole 48h feed *before* the already-stored check, so its ten slots went to
+filings classified hours earlier. Over a five-hour production run (Actions job
+105125895353), all 132 cycles logged `fetched=10` and 85 logged `new=0`.
+
+**Fixed** (commit `77ad76d`):
+
+- Groq leads on `openai/gpt-oss-120b` — 1000 requests/day against Gemini's 20.
+  The weaker model, but a filing nobody reads is worth less than a filing read
+  by the second-best one. It reproduces the million/lakh/crore unit-conversion
+  case that caused a past 10× misreport. Groq's real ceiling is **8000
+  tokens/min**, not requests, so calls are paced 15s apart and charged against a
+  rolling minute of observed usage.
+- Dedupe runs before the cap.
+- A failed classification no longer deletes the filing: `classify_attempts`
+  allows 3 attempts while it is still inside the freshness window.
+- `classification_error` stores which backend failed and why; non-429 errors log
+  at WARNING once per cycle; a 4xx marks a backend dead for the cycle and counts
+  toward the early stop, which previously never fired.
+
+**Also fixed** (commit `f925631`) — the taxonomy had nowhere to put bad news, so
+`credit_rating`, `management_change`, `insolvency` and `default_payment` were
+added. A CEO's demise used to classify as `other`/**neutral**, and a neutral
+direction never alerts, so it reached nobody. Verified live on eight filing
+shapes, all eight correct — including the two that must *stay* quiet, a rating
+reaffirmation and an end-of-term retirement.
+
+**Verified**: three live cycles on production defaults; the last classified
+10/10 with no failures or rate limiting, in 138s. 222 tests pass.
+
+**Still open**:
+- **Every hit-rate in this file is provisional.** They were measured on the 23%
+  of the funnel that survived, and that 23% was selected by *which LLM calls
+  happened to succeed* — not a random subsample. Re-baseline once the fixed
+  pipeline has accumulated its own history.
+- `min_materiality_score` stays at 0.65. An auditor resignation and a plant fire
+  both scored 0.60 in live testing, so they store but do not push. Moving the
+  threshold now would confound the re-baseline.
+- `credit_rating` inherits the `analyst_rating` retirement and so does not
+  alert, including on genuine downgrades. The old measurement mixed downgrades
+  with reaffirmations; reaffirmations are now forced to materiality < 0.3, so
+  the bucket can finally be measured on rating *actions* alone.
 
 ### 2026-09-17 (later) — Most of the measured "edge" was an entry price nobody could trade
 

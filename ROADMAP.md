@@ -10,9 +10,9 @@ Update this file when an item ships or when evidence changes its priority.
 
 ---
 
-## The finding that reorders everything
+## The finding that reordered everything — DIAGNOSED AND FIXED 2026-09-17
 
-**77% of ingested filings are never classified.**
+**77% of ingested filings were never classified.**
 
 | stage | count | note |
 |---|---|---|
@@ -22,22 +22,33 @@ Update this file when an item ships or when evidence changes its priority.
 | judged material | 1520 | |
 | alerted | 377 | |
 
-Every daily rate since 2026-08-31 sits between 64% and 88%, so this is ongoing,
-not a historical blip. The stored reason is uniform: *"LLM classification failed
-or backend unreachable."*
+**Root cause: Gemini's free tier allows 20 requests per day.** Read verbatim
+from its own 429 on 2026-09-17:
 
-This dwarfs every tuning question. The alert quality work to date has been
-optimising the 23% of the funnel that survives.
+> Quota exceeded for metric: generate_content_free_tier_requests,
+> **limit: 20**, model: gemini-3.5-flash
 
-**It is not `MAX_ARTICLES_PER_CYCLE`.** That defaults to 10, but at one cycle
-per ~2 min for ~5 h a run can attempt ~1500 articles against ~150–230 arriving
-daily. The cap is not binding; the LLM calls themselves are failing.
+Against 150–230 filings a day, that is the whole story. It also resolves the
+07:00 UTC anomaly this document flagged as "inconsistent with a simple daily
+cap": 07:00 UTC is midnight Pacific, when the quota resets. Nothing caught the
+overflow because the Groq fallback pointed at a model Groq had decommissioned,
+returning 404 on every call — at DEBUG level, under INFO-level logging.
 
-**Root cause is not yet pinned down.** Failure rate by UTC hour is *not* the
-monotonic ramp a pure daily quota would produce — it peaks at 90–95% but drops
-to 6% at 07:00 UTC and 28% at 08:00 UTC. That recovery window is inconsistent
-with a simple daily cap and needs the actual Actions logs (429 vs timeout vs
-parse failure) before anything is changed.
+> **Correction.** This section previously said "It is not
+> `MAX_ARTICLES_PER_CYCLE`". That was wrong. The cap was applied to the whole
+> 48h feed *before* the already-stored check, so its ten slots went to filings
+> classified hours earlier. Over a five-hour production run (Actions job
+> 105125895353), **all 132 cycles logged `fetched=10` and 85 logged `new=0`**.
+> The cap was binding on every single cycle. The reasoning behind the original
+> claim — capacity of ~1500 articles/run — was arithmetic about a path the
+> articles never took.
+
+Fixed in `77ad76d`: Groq (1000 req/day) leads, dedupe runs before the cap,
+failures are retried up to 3× instead of being written off, and the reason is
+stored in `classification_error` rather than only in a log that scrolls away.
+See `SESSION_LOG.md` for what was verified.
+
+**The re-baseline in P0.4 below is still outstanding and still matters most.**
 
 ---
 
@@ -60,10 +71,10 @@ Negative catalysts specifically — the category the system looks weakest on.
 that the system misses bad news is correct, but the cause is throughput, not
 blindness — it never reads them.
 
-### The taxonomy also flattens them
+### The taxonomy also flattened them — FIXED 2026-09-17 (`f925631`)
 
-`EventType` (`src/classification/schema.py`) has no member for credit rating,
-management change, insolvency, default, litigation or plant disruption. So:
+`EventType` (`src/classification/schema.py`) had no member for credit rating,
+management change, insolvency or default, so:
 
 - **Credit rating → `analyst_rating`.** 43 of 46 delivered `analyst_rating`
   alerts are credit-rating filings, not broker opinions. That bucket is
@@ -77,11 +88,19 @@ A further problem inside credit rating: most filings are **re-affirmations**
 (49 neutral / 43 bullish / 8 bearish). A reaffirmation is a non-event; the
 downgrade is the signal, and it is currently buried in the same bucket.
 
+`credit_rating`, `management_change`, `insolvency` and `default_payment` now
+exist, and the prompt names the cases the model was getting wrong. The three
+bullets above were re-tested live against the new prompt and all three now
+classify correctly and directionally. `litigation` and `plant_disruption` were
+deliberately left in their existing buckets — see P1.6.
+
 > Note on the `analyst_rating` retirement (2026-09-17): it was measured on what
 > is really credit-rating data, and that data is still negative
-> (tradable 58.1% hit, **−0.44%** avg alpha, n=31). The retirement stands. But
-> the right fix is to split the bucket, not to leave downgrades permanently
-> blocked alongside reaffirmations.
+> (tradable 58.1% hit, **−0.44%** avg alpha, n=31). The retirement stands and
+> `credit_rating` inherits it, because that is the population it was measured
+> on. Reaffirmations no longer alert, so the bucket can at last be measured on
+> rating *actions* alone — see P1.9. Until that is done, a genuine downgrade is
+> stored but not pushed.
 
 ---
 
@@ -139,57 +158,72 @@ open→close result above.
 
 ### P0 — Fix the funnel. Nothing else matters at 77% loss.
 
-1. **Diagnose the classification failures from the Actions logs.** Count 429 vs
-   timeout vs parse failure vs unreachable, per backend. Do not change limits
-   before this — the 07:00 UTC recovery says the obvious guess is wrong.
-2. **Record the failure reason in the DB.** `reasoning` is one constant string
-   for all 5223 rows, which is why this needed log archaeology. A
-   `classification_error` column makes it queryable and makes any fix
-   verifiable.
-3. **Fix throughput** per the diagnosis. Options, cheapest first: a second
-   Gemini key; raise `_GEMINI_MIN_INTERVAL_SECONDS` if it's RPM; batch several
-   filings per call (a filing classification is ~80 output tokens — 10 per call
-   is realistic and cuts request count 10×); make Groq a real fallback rather
-   than a same-cycle retry.
-4. **Re-baseline everything afterwards.** Every hit-rate in `SESSION_LOG.md` is
-   measured on a 23% sample that was *selected by which LLM calls happened to
-   succeed* — not a random subsample. Treat current numbers as provisional.
+1. ~~**Diagnose the classification failures from the Actions logs.**~~ **DONE** —
+   Gemini free tier = 20 requests/day; Groq fallback 404ing on a decommissioned
+   model. See above.
+2. ~~**Record the failure reason in the DB.**~~ **DONE** — `classification_error`
+   column, plus `classify_attempts` so a failure delays a filing instead of
+   deleting it.
+3. ~~**Fix throughput.**~~ **DONE** — Groq leads (1000 req/day), paced against
+   its real 8000 tokens/min ceiling; dedupe before the per-cycle cap. Verified
+   live at 10/10 classified per cycle.
+4. **Re-baseline everything.** ← **now the top priority.** Every hit-rate in
+   `SESSION_LOG.md` is measured on a 23% sample that was *selected by which LLM
+   calls happened to succeed* — not a random subsample. Treat current numbers as
+   provisional, including the A-setup that the alert currently advertises.
+   Needs roughly a fortnight of post-fix history before it says anything.
+5. **Batch several filings per call.** Not needed yet, but it is the structural
+   answer if ingestion ever widens: ~900 of the ~1700 tokens per call is the
+   system prompt, so 8 filings per call is ~2.5× more filings per token. Do this
+   before adding a second key.
 
 **Expected:** ~4× the alert candidates, ~3–4× the bearish sample. That alone
 makes the open→close question answerable.
 
-### P1 — Give negative catalysts their own identity
+### P1 — Give negative catalysts their own identity — DONE 2026-09-17 (`f925631`)
 
-5. **Extend `EventType`**: `credit_rating`, `management_change`, `insolvency`,
-   `default_payment`, `litigation`, `plant_disruption`. Priors in
-   `confidence_table.yaml` start conservative and get shrunk toward measurement
-   as usual.
-6. **Separate rating *actions* from *affirmations*.** A downgrade, an outlook
-   cut and a reaffirmation are three different events sharing one category
-   today. The prompt must extract the action, not just the topic.
-7. **Stop neutral-ing genuine catalysts.** A CEO demise classified
-   `other/neutral` never alerts. Add worked examples to `_SYSTEM_PROMPT` for
-   management exit, auditor resignation, insolvency admission and rating
-   downgrade.
-8. **Then re-open the `analyst_rating` retirement** — with credit ratings split
-   out and downgrades separated from reaffirmations, the measurement is finally
-   asking a coherent question.
+6. ~~**Extend `EventType`.**~~ **DONE** — `credit_rating`, `management_change`,
+   `insolvency`, `default_payment` added. `litigation` and `plant_disruption`
+   deliberately **not** split: `regulatory_legal` measures 75% at 3d with no
+   evidence it is broken, and plant events are too few to justify a bucket.
+   Splitting costs sample size, so it needs a reason each time.
+7. ~~**Separate rating *actions* from *affirmations*.**~~ **DONE** — the prompt
+   forces a reaffirmation to neutral at materiality < 0.3, so it stops entering
+   the sample at all. Verified live: a CRISIL downgrade reads bearish/0.80, an
+   ICRA reaffirmation neutral/0.15.
+8. ~~**Stop neutral-ing genuine catalysts.**~~ **DONE** — verified live on eight
+   filing shapes, all eight correct, including the two that must *stay* neutral
+   (reaffirmation, end-of-term retirement).
+9. **Re-open the `analyst_rating` / `credit_rating` retirement.** Still open, and
+   now answerable: `credit_rating` inherits the retirement because the original
+   measurement was taken on that population (43 of 46 delivered `analyst_rating`
+   alerts were rating-agency filings). With reaffirmations no longer alerting,
+   the bucket can be measured on rating *actions* alone for the first time.
+   Until then a genuine downgrade is stored but not pushed.
+10. **Revisit `min_materiality_score` (0.65) — with measurement, not by feel.**
+    In live testing an auditor resignation and a plant fire both scored 0.60, so
+    they store but do not push. Both look like real catalysts. Do not move this
+    until P0.4 is done: changing the gate mid-re-baseline confounds it.
 
 ### P2 — Trade the asymmetry, once the sample supports it
 
-9. **Add `ret_intraday` (open→close) as a first-class horizon.** Currently the
-   only way to see the most promising result in this document is an ad-hoc
-   script. It belongs in `outcomes.py` next to `ret_1d`.
-10. **Re-test bearish open→close at n≥50.** If it holds near +0.79%, bearish
+11. **Add `ret_intraday` (open→close) as a first-class horizon.** Currently the
+    only way to see the most promising result in this document is an ad-hoc
+    script. It belongs in `outcomes.py` next to `ret_1d`. Independent of the
+    P0.4 re-baseline, so it can be built now and will simply start collecting.
+12. **Re-test bearish open→close at n≥50.** If it holds near +0.79%, bearish
     after-hours alerts get a real trade plan (short at the open, cover at the
-    close) instead of today's "do not short this alone".
-11. **Test whether bullish after-hours alerts are worth sending at all.**
+    close) instead of today's "do not short this alone". The P0 fix plus the P1
+    taxonomy should supply that sample far faster than the old funnel could —
+    management_change, insolvency and default_payment are bearish by nature and
+    were previously invisible.
+13. **Test whether bullish after-hours alerts are worth sending at all.**
     Open→close is −0.07% (n=34): the gap takes everything. If that holds, they
     are informational, not actionable, and should say so.
 
 ### P3 — Market-regime risk
 
-12. **The entire sample is a falling market** — NIFTY was down in 72% of 1d
+14. **The entire sample is a falling market** — NIFTY was down in 72% of 1d
     windows (80% at 3d, 81% at 5d). The A-setup's 80.5% alpha hit-rate against
     a 43.9% raw hit-rate is partly that. No amount of extra data *from this
     window* fixes it; it needs either a rising-market sample or explicit
