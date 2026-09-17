@@ -96,10 +96,10 @@ _GROQ_MIN_INTERVAL_SECONDS = 15.0
 _last_groq_call_at = 0.0
 _groq_token_window: list[tuple[float, int]] = []
 
-# Gemini free-tier RPM (~10/min): space calls at least this far apart so a full
-# cycle's worth of classifications never trips a 429. Simple min-interval
-# throttle rather than a sliding window — Gemini's quota resets fast enough
-# that "one call every ~7s" alone keeps us comfortably under.
+# Gemini free-tier RPM (~10/min). This is NOT the limit that matters — the
+# daily allowance of 20 requests is (see _GEMINI_MODEL above), and spacing does
+# nothing for a per-day cap. Kept only so Gemini's small daily allowance isn't
+# spent as one burst.
 _GEMINI_MIN_INTERVAL_SECONDS = 6.5
 _last_gemini_call_at = 0.0
 
@@ -285,9 +285,12 @@ def _record_groq_usage(tokens: int | None) -> None:
 
 
 def _throttle_gemini() -> None:
-    """Sleep just enough to keep calls spaced under the free-tier RPM. Unlike
-    Groq's reject-and-skip, this blocks briefly — Gemini's per-call cost in
-    wait time is small and the quota resets fast, so waiting beats skipping."""
+    """Sleep just enough to keep calls spaced under the free-tier RPM.
+
+    Note this paces requests per MINUTE, which is not what actually binds:
+    the free-tier allowance is 20 requests per DAY, and no amount of spacing
+    helps with that. It is kept only so the handful of daily Gemini calls
+    don't arrive as a burst."""
     global _last_gemini_call_at
     now = time.monotonic()
     wait = _GEMINI_MIN_INTERVAL_SECONDS - (now - _last_gemini_call_at)
