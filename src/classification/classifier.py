@@ -88,11 +88,11 @@ _GROQ_ASSUMED_TOKENS = 2000
 # that. Past this the cycle is better off handing the filing back to the retry
 # queue than blocking on it.
 _GROQ_MAX_WAIT_SECONDS = 45.0
-# Primary pacing. 7000 tokens/min at ~1.6K a filing is ~4.4 calls/min, so
-# spacing calls ~14s apart spends the budget evenly instead of firing a burst
-# and then stalling for the rest of the minute — which is what a pure rolling
-# window does on its own, and it starves the back half of every cycle.
-_GROQ_MIN_INTERVAL_SECONDS = 14.0
+# Primary pacing. Measured live at ~1.7K tokens a filing, so 7000 tokens/min is
+# 4 calls/min and 15s spacing spends the budget evenly — instead of firing a
+# burst and then stalling for the rest of the minute, which is what the rolling
+# window does on its own and it starves the back half of every cycle.
+_GROQ_MIN_INTERVAL_SECONDS = 15.0
 _last_groq_call_at = 0.0
 _groq_token_window: list[tuple[float, int]] = []
 
@@ -127,8 +127,15 @@ So "Profit 9,751.2" under "(Rs. in million)" is Rs 975.1 cr, NOT Rs 9,751.2 cr. 
 ALWAYS express money in crore as "Rs <n> cr", whatever unit the filing used. Never copy the digits across unconverted, and never relabel a figure's unit without converting it. If no unit header is stated, use the figure as printed and do not guess a multiplier. Percentages, ratios and per-share amounts are never converted.
 
 headline: a clean, factual one-line summary of what actually happened, with the key number if present (e.g. "Reports FY26 net profit up 29% to Rs 236 cr", "Wins Rs 5,000 cr order from NHAI", "Board recommends Rs 229 final dividend"). If the filing is purely procedural (newspaper notice, AGM intimation, trading-window closure, compliance certificate) say so plainly (e.g. "Routine AGM notice, no financial detail").
-event_type (pick ONE): earnings_surprise (results beat/miss), guidance_change (company revises outlook), ma_deal (merger/acquisition/stake sale), analyst_rating (rating/target change), regulatory_legal (regulator/investigation/litigation/penalty), insider_activity (promoter/insider buy/sell), partnership_contract (order win/partnership), macro_sector (sector/macro), other.
+event_type (pick ONE): earnings_surprise (results beat/miss), guidance_change (company revises outlook), ma_deal (merger/acquisition/stake sale), credit_rating (a RATING AGENCY — CRISIL/ICRA/CARE/India Ratings/Brickwork/Acuite — assigns, upgrades, downgrades, reaffirms or revises the outlook on the company's debt), analyst_rating (a BROKER or research house changes a rating or target price on the SHARE — not a debt rating agency), management_change (appointment, resignation, removal or DEMISE of a director, MD, CEO, CFO, Chairman, Company Secretary or statutory auditor), insolvency (NCLT/IBC petition or admission, winding-up, liquidation, resolution plan), default_payment (default or delay on interest/principal, debt servicing failure, pledge invocation), regulatory_legal (regulator/investigation/litigation/penalty/court order), insider_activity (promoter/insider buy/sell), partnership_contract (order win/partnership), macro_sector (sector/macro), other.
 direction: bullish | bearish | neutral (likely short-term price impact).
+Do NOT reach for neutral on a genuine catalyst. Neutral is for filings carrying no new tradable fact — procedural notices, and changes that confirm the status quo. Specifically:
+  - Demise, or abrupt resignation, of a promoter/MD/CEO/CFO/Chairman -> bearish. An orderly succession announced in advance with a named successor, or a routine end-of-term retirement of a non-executive director -> neutral.
+  - Resignation of the statutory auditor, or a qualified/adverse audit opinion -> bearish.
+  - Rating DOWNGRADE, or outlook revised to negative -> bearish. UPGRADE, or outlook revised to positive -> bullish. REAFFIRMATION at the same rating and outlook is a non-event -> neutral, materiality below 0.3.
+  - Insolvency petition filed or admitted against the company -> bearish. A petition withdrawn, dismissed or settled -> bullish.
+  - Default or delay in servicing debt -> bearish.
+  - Fire, accident, force majeure or an unplanned plant shutdown -> bearish (use event_type "other").
 reason: ONE sentence citing a specific fact from the filing.
 magnitude_pct: number if stated (e.g. "profit up 29%" -> 29.0), else null. Never invent one.
 materiality_score: 0.0-1.0 — is this genuinely stock-moving for THIS company? HIGH for real results/orders/M&A/penalties/rating/buyback/dividend. LOW (below 0.3) for procedural notices (AGM/newspaper/trading-window/compliance-certificate/record-date) that carry no new financial fact.
@@ -138,6 +145,13 @@ Example: {"headline":"Reports FY26 net profit up 29% to Rs 236 cr","event_type":
 
 Unit-conversion example — filing says "(Rs. in million)" and "Profit for the period 9,751.2" vs "6,592.3" prior year, so 9,751.2 million = Rs 975.1 cr:
 {"headline":"Reports Q1 net profit up 48% YoY to Rs 975.1 cr","event_type":"earnings_surprise","direction":"bullish","reason":"Q1 net profit rose 48% YoY to Rs 975.1 cr from Rs 659.2 cr.","magnitude_pct":48.0,"materiality_score":0.9,"impact_horizon":"1_3_days"}
+
+Demise of a key executive — a real catalyst, not an administrative notice:
+{"headline":"Managing Director and promoter Mr A. Sharma passes away","event_type":"management_change","direction":"bearish","reason":"The MD and promoter died on 16 September 2026, leaving the leadership vacant.","magnitude_pct":null,"materiality_score":0.85,"impact_horizon":"1_3_days"}
+
+Rating ACTION vs REAFFIRMATION — the action is the signal, the reaffirmation is not:
+{"headline":"CRISIL downgrades long-term rating to BB+ with negative outlook","event_type":"credit_rating","direction":"bearish","reason":"CRISIL cut the long-term bank facility rating from BBB-/Stable to BB+/Negative.","magnitude_pct":null,"materiality_score":0.8,"impact_horizon":"1_3_days"}
+{"headline":"ICRA reaffirms long-term rating at A/Stable","event_type":"credit_rating","direction":"neutral","reason":"ICRA reaffirmed the existing A/Stable rating with no change.","magnitude_pct":null,"materiality_score":0.2,"impact_horizon":"unknown"}
 """
 
 _STRICT_SUFFIX = (

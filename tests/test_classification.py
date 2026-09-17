@@ -22,7 +22,7 @@ VALID_JSON = (
 
 @pytest.fixture
 def no_groq_spacing(monkeypatch):
-    """Drop the 14s inter-call pacing so throttle tests don't really sleep."""
+    """Drop the inter-call pacing so throttle tests don't really sleep."""
     monkeypatch.setattr(classifier, "_GROQ_MIN_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(classifier, "_last_groq_call_at", 0.0)
 
@@ -342,3 +342,47 @@ def test_groq_gets_its_own_token_budget_for_thinking():
     # shared 200 budget Groq rejects the call with json_validate_failed.
     assert classifier._GROQ_MAX_TOKENS > classifier._MAX_TOKENS
     assert "llama-3.3-70b-versatile" not in classifier._GROQ_MODEL
+
+
+# ── negative catalysts need their own identity ───────────────────────────────
+# Until 2026-09-17 the taxonomy had no member for a credit rating, a management
+# change, an insolvency or a payment default, so the model filed them under
+# whatever was nearest: insolvency/NCLT landed in regulatory_legal (22 of 43 as
+# NEUTRAL) and resignation/demise in other (5 of 10 NEUTRAL). A neutral
+# direction never alerts, so a CEO's death reached nobody. Behaviour verified
+# live against gpt-oss-120b across eight filing shapes; these pin the prompt
+# contract those depend on.
+
+
+def test_negative_catalysts_have_their_own_event_types():
+    from src.classification.schema import EventType
+    from typing import get_args
+
+    for event_type in ("credit_rating", "management_change", "insolvency", "default_payment"):
+        assert event_type in get_args(EventType)
+
+
+def test_prompt_separates_rating_agencies_from_brokers():
+    # 43 of 46 delivered analyst_rating alerts were rating-agency filings.
+    p = classifier._SYSTEM_PROMPT
+    assert "CRISIL/ICRA/CARE" in p
+    assert "not a debt rating agency" in p
+
+
+def test_prompt_treats_a_reaffirmation_as_a_non_event():
+    # The bucket mixed downgrades with reaffirmations (49 neutral / 43 bullish /
+    # 8 bearish); a reaffirmation alerted as bullish is a non-event traded as
+    # good news.
+    p = classifier._SYSTEM_PROMPT
+    assert "REAFFIRMATION at the same rating and outlook is a non-event" in p
+    assert "materiality below 0.3" in p
+
+
+def test_prompt_names_demise_as_bearish_and_orderly_succession_as_not():
+    p = classifier._SYSTEM_PROMPT
+    assert "Demise, or abrupt resignation, of a promoter/MD/CEO/CFO/Chairman -> bearish" in p
+    assert "named successor" in p
+
+
+def test_prompt_tells_the_model_not_to_reach_for_neutral():
+    assert "Do NOT reach for neutral on a genuine catalyst" in classifier._SYSTEM_PROMPT

@@ -22,14 +22,25 @@
 # Deliberately NOT set equal to the measured rates: most buckets are n<20, and
 # the calibration layer already pulls toward the empirical number. These are
 # moved toward reality, not fitted to it.
+#
+# credit_rating / management_change / insolvency / default_payment were added
+# 2026-09-17 with the taxonomy split (src/classification/schema.py) and have NO
+# measured record of their own — every filing that would now land in them was
+# previously scored under analyst_rating, regulatory_legal or other. They start
+# at or just below the "other" prior rather than at a confident number, and the
+# calibration layer will move them as outcomes mature.
 base_rates:
   regulatory_legal: 0.60
   earnings_surprise: 0.55
   guidance_change: 0.55
   analyst_rating: 0.55
+  insolvency: 0.52
+  default_payment: 0.52
   macro_sector: 0.50
+  credit_rating: 0.50
   insider_activity: 0.48
   partnership_contract: 0.48
+  management_change: 0.45
   ma_deal: 0.45
   other: 0.45
 
@@ -54,6 +65,18 @@ high_tier_confidence_threshold: 0.35
 #                     chance at EVERY horizon, measured 2026-08-11. A promoter
 #                     buying or selling turns out to say little about the next
 #                     few days' direction.
+#   credit_rating:    inherits the analyst_rating retirement below, because that
+#                     measurement was taken on THIS population: 43 of the 46
+#                     delivered analyst_rating alerts were rating-agency filings.
+#                     The bucket also mixed genuine downgrades with
+#                     reaffirmations (49 neutral / 43 bullish / 8 bearish), and a
+#                     reaffirmation alerted as bullish is a non-event traded as
+#                     good news — a plausible source of the negative alpha. The
+#                     prompt now forces reaffirmations to materiality < 0.3, so
+#                     they stop entering the sample at all. Re-measure once
+#                     rating ACTIONS have accumulated on their own; until then
+#                     the direction claim stays off. This does mean a genuine
+#                     downgrade is stored but not pushed.
 #   analyst_rating:   retired 2026-09-17 on a weaker but one-directional case.
 #                     Unlike the two above it is not below chance on hit-rate
 #                     (54.5% at 1d), so the evidence is AVERAGE ALPHA, which is
@@ -66,10 +89,17 @@ high_tier_confidence_threshold: 0.35
 #                     more than half the time while losing more per trade than
 #                     it wins is a losing alert, so it stops claiming a
 #                     direction. Revisit if a larger sample turns it positive.
+#
+# management_change, insolvency and default_payment are deliberately NOT here.
+# They have no measured record either, but they were previously invisible — the
+# model filed them as other/neutral and a neutral direction never alerts — so
+# blocking them now would preserve exactly the blind spot the split was made to
+# fix. They alert, and get measured.
 directionally_unreliable_event_types:
   - ma_deal
   - insider_activity
   - analyst_rating
+  - credit_rating
 
 # Suppress a BULLISH alert when the stock has already risen this much over the
 # 5 sessions before the filing -- "buy the rumour, sell the news". Measured on
