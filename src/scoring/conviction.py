@@ -45,6 +45,14 @@ but 20 of those 57 were after-hours filings measured from a pre-news close, the
 same artefact documented in market_data.get_forward_return_from_open. Removing
 the uncapturable entries flips the sign. That is the whole reason entry basis is
 tracked.
+
+KNOWN LIMIT — the whole sample is a falling market. NIFTY was down in 72% of
+the 1d windows (80% at 3d, 81% at 5d), averaging -0.14% / -0.46% / -0.68%. So
+the alpha edge here has only ever been measured against a declining index and
+is untested in a rising one. It also explains the alpha/raw gap: an A-setup
+stock averaged +0.67% while NIFTY averaged -0.17% over the same windows, which
+is a large alpha and a modest absolute gain. Treat the alpha number as the
+validated claim and the raw number as what an unhedged long actually banked.
 """
 
 from __future__ import annotations
@@ -61,6 +69,16 @@ VALIDATED_MIN_MATERIALITY = 0.75
 # weigh it. n=41 total, 26 of them out-of-sample — real, but not large.
 _VALIDATED_N = 41
 _VALIDATED_OUT_OF_SAMPLE_RATE = "77%"
+
+# The hit-rates above are ALPHA — how often the stock beat NIFTY. They are NOT
+# how often the trade made money, and the gap is large enough to mislead:
+# NIFTY fell in 72% of the 1d windows in this sample (avg -0.14%), so a stock
+# could beat it while still falling. Unhedged, an A-setup long won 43.9% of the
+# time (n=41) at +0.67% average (t=+1.95) — positive expectancy carried by the
+# size of the winners, not their frequency. Both numbers go in the alert,
+# because "77%" alone reads as a win rate and would be acted on as one.
+_VALIDATED_RAW_HIT_RATE = "44%"
+_VALIDATED_RAW_AVG = "+0.67%"
 
 # Bearish evidence, tradable entries only, 1d. RAW is quoted rather than alpha
 # because a short pays out on the stock actually falling, not on it
@@ -92,8 +110,10 @@ def conviction_line(
     """
     if is_validated_setup(event_type, materiality_score):
         return (
-            f"✅ <b>A-setup</b> — the one bucket with a validated edge "
-            f"({_VALIDATED_OUT_OF_SAMPLE_RATE} out-of-sample, n={_VALIDATED_N})"
+            f"✅ <b>A-setup</b> — beats NIFTY {_VALIDATED_OUT_OF_SAMPLE_RATE} of the "
+            f"time out-of-sample (n={_VALIDATED_N})\n"
+            f"⚠️ Unhedged win rate is only {_VALIDATED_RAW_HIT_RATE} "
+            f"({_VALIDATED_RAW_AVG} avg) — the edge is size, not frequency"
         )
     if direction == "bearish":
         return (

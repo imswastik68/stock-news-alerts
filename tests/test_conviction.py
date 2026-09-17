@@ -118,3 +118,27 @@ def test_bullish_unvalidated_still_gets_the_plain_no_edge_line():
 
 def test_direction_is_optional_so_callers_without_it_still_work():
     assert "No measured edge" in conviction_line("earnings_surprise", 0.9)
+
+
+# ── alpha is not a win rate ──────────────────────────────────────────────────
+#
+# The validated hit-rates are ALPHA (beat NIFTY). NIFTY fell in 72% of the 1d
+# windows in this sample, so a stock could beat it and still lose money:
+# unhedged, an A-setup long won 43.9% of the time at +0.67% avg (t=+1.95).
+# "77%" shown alone reads as a win rate and would be traded as one.
+
+def test_a_setup_line_says_the_rate_is_versus_nifty():
+    line = conviction_line("partnership_contract", 0.8)
+    assert "NIFTY" in line
+
+
+def test_a_setup_line_also_discloses_the_unhedged_win_rate():
+    line = conviction_line("partnership_contract", 0.8)
+    assert "44%" in line
+    assert "+0.67%" in line
+
+
+def test_a_setup_line_does_not_present_the_alpha_rate_as_money_made():
+    # Guards the specific misread: "77% out-of-sample" with no qualifier.
+    line = conviction_line("partnership_contract", 0.8)
+    assert "77% out-of-sample" not in line

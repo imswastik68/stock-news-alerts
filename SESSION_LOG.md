@@ -147,6 +147,24 @@ the new tests caught before shipping: once a row resolved to `next_close`, the
 3d/5d horizons fell through to the close branch and silently re-measured from
 the pre-news close — the exact contamination the basis exists to prevent.
 
+**Alpha is not a win rate — and the whole sample is a falling market.** NIFTY
+was down in 72% of the 1d windows (80% at 3d, 81% at 5d), averaging −0.14% /
+−0.46% / −0.68%. Every hit-rate above is alpha, so a stock could beat NIFTY and
+still lose money. For the A-setup, tradable entries:
+
+| view | 1d hit | avg | out-of-sample |
+|---|---|---|---|
+| alpha (vs NIFTY) | 80.5% | +0.84% | 76.9% |
+| **raw (unhedged long)** | **43.9%** | **+0.67%** (t=+1.95) | 38.5%, +0.49% (t=+1.27) |
+
+An A-setup stock averaged +0.67% while NIFTY averaged −0.17% over the same
+windows. So the alpha edge is real and the unhedged trade has positive
+expectancy, but it is carried by the *size* of winners, not their frequency —
+you lose on ~56% of trades. Alerts now print both numbers; "77%" alone reads as
+a win rate and would be traded as one. Two consequences: the clean way to
+capture the measured edge is market-neutral (long stock / short index), and the
+edge has never been tested against a rising index.
+
 **Bearish validated separately — it does not work.** The A-bucket is long-only
 by construction, not by choice: `partnership_contract` ran 118 bullish / 0
 bearish. Bearish alerts (21% of volume) come from `regulatory_legal` (28),
