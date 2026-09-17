@@ -36,6 +36,7 @@ from src.storage.db import (
     headline_hash,
     save_article,
     mark_alert_sent,
+    mark_alert_suppressed,
 )
 from src.alerting.telegram_bot import send_alert
 
@@ -286,7 +287,7 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
                 "pipeline: suppressing likely-duplicate alert for %s: %r",
                 raw.ticker, display_headline[:80],
             )
-            mark_alert_sent(session, article.id)
+            mark_alert_suppressed(session, article.id, "duplicate")
         elif is_priced_in(
             session,
             ticker=article.ticker,
@@ -297,7 +298,7 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             # Stock already ran up before the filing — measured to hit 22% with
             # -3.09% avg alpha (src/scoring/priced_in.py). Stored and marked
             # sent so it isn't retried, just not pushed.
-            mark_alert_sent(session, article.id)
+            mark_alert_suppressed(session, article.id, "priced_in")
         else:
             try:
                 if send_alert(article, quote=get_quote(article.ticker)):
@@ -336,7 +337,7 @@ def _send_pending_alerts(session, settings) -> int:
                 "pipeline: suppressing likely-duplicate pending alert for %s: %r",
                 article.ticker, article.headline[:80],
             )
-            mark_alert_sent(session, article.id)
+            mark_alert_suppressed(session, article.id, "duplicate")
             continue
         if is_priced_in(
             session,
@@ -345,7 +346,7 @@ def _send_pending_alerts(session, settings) -> int:
             published_at=article.published_at,
             threshold_pct=settings.priced_in_drift_threshold_pct,
         ):
-            mark_alert_sent(session, article.id)
+            mark_alert_suppressed(session, article.id, "priced_in")
             continue
         try:
             if send_alert(article, quote=get_quote(article.ticker)):

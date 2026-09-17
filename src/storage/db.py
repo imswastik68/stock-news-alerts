@@ -58,6 +58,7 @@ def _ensure_schema(engine) -> None:
         "idx_ret_1d": "ALTER TABLE articles ADD COLUMN idx_ret_1d FLOAT",
         "idx_ret_3d": "ALTER TABLE articles ADD COLUMN idx_ret_3d FLOAT",
         "idx_ret_5d": "ALTER TABLE articles ADD COLUMN idx_ret_5d FLOAT",
+        "suppressed_reason": "ALTER TABLE articles ADD COLUMN suppressed_reason VARCHAR",
     }
     with engine.begin() as conn:
         for column, ddl in additions.items():
@@ -130,6 +131,17 @@ def mark_alert_sent(session: Session, article_id: int) -> None:
         session.commit()
 
 
+def mark_alert_suppressed(session: Session, article_id: int, reason: str) -> None:
+    """Withhold an alert without ever retrying it. Sets alert_sent so the
+    pending queue skips the row, plus the reason so measurement can exclude it —
+    a withheld alert never reached anyone and must not count as one."""
+    article = session.get(Article, article_id)
+    if article is not None:
+        article.alert_sent = True
+        article.suppressed_reason = reason
+        session.commit()
+
+
 def get_pending_alert_articles(
     session: Session,
     *,
@@ -172,6 +184,7 @@ def get_hit_rate_stats(session: Session, horizon: str = "ret_3d") -> dict[str, d
     column = getattr(Article, horizon)
     stmt = select(Article.event_type, Article.direction, column).where(
         Article.alert_sent == True,  # noqa: E712
+        Article.suppressed_reason.is_(None),  # withheld alerts are not outcomes
         column.is_not(None),
         Article.direction != "neutral",
     )

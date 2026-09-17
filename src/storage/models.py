@@ -46,7 +46,18 @@ class Article(Base):
     source_quality: Mapped[float] = mapped_column(Float, default=0.0)
     is_material: Mapped[bool] = mapped_column(Boolean, default=False)
     reasoning: Mapped[str] = mapped_column(String)
+    # True once the row has been HANDLED, which is not the same as delivered:
+    # a suppressed duplicate is marked too, so it is never retried. Check
+    # suppressed_reason to tell the two apart.
     alert_sent: Mapped[bool] = mapped_column(Boolean, default=False)
+    # NULL = actually pushed to Telegram. Otherwise why it was withheld
+    # ("duplicate", "priced_in"). Measurement MUST exclude non-NULL rows: a
+    # suppressed duplicate's forward return is measured from a base after the
+    # move it duplicates has already happened, so it is noise. Measured
+    # 2026-09-17: the 28% of alert_sent rows that were never delivered hit 47.8%
+    # at 1d against 64.4% for delivered ones, dragging the reported track record
+    # down by ~5 points and feeding the same noise into confidence calibration.
+    suppressed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     # Outcome tracking (filled in later by src/scoring/outcomes.py for alerted
     # rows): forward % return of the stock over N trading days from the alert.

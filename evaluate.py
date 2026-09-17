@@ -88,6 +88,7 @@ def _rows(session, horizon):
         Article.confidence, ret_col, idx_col,
     ).where(
         Article.alert_sent == True,  # noqa: E712
+        Article.suppressed_reason.is_(None),  # never delivered => never an alert
         ret_col.is_not(None),
         Article.direction != "neutral",
     )
@@ -120,6 +121,7 @@ def coverage_stats(session, horizon: str) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
     stmt = select(Article.ticker, col).where(
         Article.alert_sent == True,  # noqa: E712
+        Article.suppressed_reason.is_(None),
         Article.published_at <= cutoff,
     )
     rows = list(session.execute(stmt))
