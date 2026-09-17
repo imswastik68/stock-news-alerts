@@ -80,19 +80,35 @@ def _fmt_rate_ci(hits: int, n: int) -> str:
     return f"{hits / n:.0%} [{lo:.0%}-{hi:.0%}]"
 
 
-def _rows(session, horizon):
+def _delivered():
+    return [
+        Article.alert_sent == True,  # noqa: E712
+        Article.suppressed_reason.is_(None),  # never delivered => never an alert
+        Article.direction != "neutral",
+    ]
+
+
+def _shadow():
+    """Classified, directional filings we chose NOT to alert on — a blocked
+    event type or one under min_materiality_score. Measured by
+    track_shadow_outcomes(); see its docstring for why they exist. This is the
+    counterfactual: what the track record WOULD have been had we sent them."""
+    return [
+        Article.alert_sent == False,  # noqa: E712
+        Article.direction != "neutral",
+        Article.event_type != "classification_failed",
+    ]
+
+
+def _rows(session, horizon, shadow: bool = False):
     ret_col = getattr(Article, horizon)
     idx_col = getattr(Article, f"idx_{horizon}")
+    where = (_shadow if shadow else _delivered)()
     # entry_basis goes LAST so existing positional unpacking stays valid.
     stmt = select(
         Article.event_type, Article.impact_tier, Article.direction,
         Article.confidence, ret_col, idx_col, Article.entry_basis,
-    ).where(
-        Article.alert_sent == True,  # noqa: E712
-        Article.suppressed_reason.is_(None),  # never delivered => never an alert
-        ret_col.is_not(None),
-        Article.direction != "neutral",
-    )
+    ).where(*where, ret_col.is_not(None))
     return list(session.execute(stmt))
 
 
@@ -107,7 +123,7 @@ def alpha_of(ret: float, idx_ret: float | None) -> float | None:
     return None if idx_ret is None else ret - idx_ret
 
 
-def coverage_stats(session, horizon: str) -> dict:
+def coverage_stats(session, horizon: str, shadow: bool = False) -> dict:
     """Alerted articles old enough that `horizon` should have matured: how many
     actually got a measured outcome vs. stayed NULL (permanently unpriceable —
     mostly BSE-only scrips with no Yahoo Finance data).
@@ -120,11 +136,8 @@ def coverage_stats(session, horizon: str) -> dict:
     col = getattr(Article, horizon)
     min_age_days = _MIN_AGE_DAYS.get(horizon, 3)
     cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
-    stmt = select(Article.ticker, col).where(
-        Article.alert_sent == True,  # noqa: E712
-        Article.suppressed_reason.is_(None),
-        Article.published_at <= cutoff,
-    )
+    where = (_shadow if shadow else _delivered)()
+    stmt = select(Article.ticker, col).where(*where, Article.published_at <= cutoff)
     rows = list(session.execute(stmt))
     total = len(rows)
     measured = sum(1 for _, ret in rows if ret is not None)
@@ -208,20 +221,33 @@ def _entry_basis_report(rows) -> None:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--horizon", default="ret_3d", choices=["ret_1d", "ret_3d", "ret_5d"])
+    ap.add_argument(
+        "--shadow", action="store_true",
+        help="Report the filings we classified but did NOT alert on (blocked event "
+             "types, sub-materiality rows) instead of delivered alerts. This is the "
+             "counterfactual record that ROADMAP P1.9/P1.10 are decided on.",
+    )
     args = ap.parse_args()
 
     session = get_session()
     try:
-        rows = _rows(session, args.horizon)
-        cov = coverage_stats(session, args.horizon)
+        rows = _rows(session, args.horizon, shadow=args.shadow)
+        cov = coverage_stats(session, args.horizon, shadow=args.shadow)
     finally:
         session.close()
 
-    print(f"=== Alert track record ({args.horizon}) — {len(rows)} matured alert(s) ===")
+    if args.shadow:
+        print(f"=== SHADOW (never sent) ({args.horizon}) — {len(rows)} matured filing(s) ===")
+        print("These were classified and withheld. Nothing here was traded, and none")
+        print("of it feeds confidence calibration. It answers one question only:")
+        print("what would have happened had we sent them.")
+    else:
+        print(f"=== Alert track record ({args.horizon}) — {len(rows)} matured alert(s) ===")
 
+    noun = "withheld filings" if args.shadow else "alerts"
     if cov["total"] > 0:
         print(
-            f"coverage: {cov['measured']}/{cov['total']} matured alerts have measured "
+            f"coverage: {cov['measured']}/{cov['total']} matured {noun} have measured "
             f"outcomes; {len(cov['missing_tickers'])} unpriceable (mostly BSE-only scrips)"
         )
         if cov["missing_tickers"]:
@@ -229,7 +255,7 @@ def main():
                   + (" ..." if len(cov["missing_tickers"]) > 20 else ""))
 
     if not rows:
-        print("\nNo matured alert outcomes yet. Let it run and re-check in a few days.")
+        print(f"\nNo matured outcomes for {noun} yet. Let it run and re-check in a few days.")
         return
 
     overall_hits = sum(1 for _, _, d, _, r, _, _ in rows if _hit(d, r))

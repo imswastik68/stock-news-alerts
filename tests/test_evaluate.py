@@ -244,3 +244,86 @@ def test_rows_with_null_idx_ret_kept_for_raw_but_excluded_from_alpha(session):
 
     alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx, _ in rows if idx is not None]
     assert len(alpha_rows) == 1  # only the one with a recorded index leg
+
+
+# --- Shadow reporting ------------------------------------------------------
+#
+# track_shadow_outcomes() measures filings we withheld. Without a way to READ
+# them the collection is pointless, but the two record-sets must never mix:
+# the delivered track record is what was actually traded.
+
+
+def _add_shadow(session, ticker, ret_3d, event_type="credit_rating",
+                direction="bearish", published_days_ago=5):
+    """A classified, directional filing that was never alerted."""
+    a = save_article(
+        session, ticker=ticker, headline=f"{ticker} headline", url=f"u-shadow-{ticker}",
+        source="nse_announcements",
+        published_at=datetime.now(timezone.utc) - timedelta(days=published_days_ago),
+        category="Rating", impact_tier="high", event_type=event_type,
+        direction=direction, confidence=0.7, materiality_score=0.7,
+        impact_horizon="1_3_days", source_quality=1.0, is_material=True, reasoning="x",
+    )
+    if ret_3d is not None:
+        a.ret_3d = ret_3d
+        session.commit()
+    return a
+
+
+def test_default_report_excludes_withheld_filings(session):
+    from evaluate import _rows
+
+    _add(session, "SENT.NS", ret_3d=2.0)
+    _add_shadow(session, "HELD.NS", ret_3d=-9.0)
+
+    rows = _rows(session, "ret_3d")
+    assert len(rows) == 1
+    assert rows[0][4] == 2.0
+
+
+def test_shadow_report_returns_only_the_withheld_filings(session):
+    from evaluate import _rows
+
+    _add(session, "SENT.NS", ret_3d=2.0)
+    _add_shadow(session, "HELD.NS", ret_3d=-9.0)
+
+    rows = _rows(session, "ret_3d", shadow=True)
+    assert len(rows) == 1
+    assert rows[0][0] == "credit_rating"
+    assert rows[0][4] == -9.0
+
+
+def test_shadow_report_skips_neutral_and_failed_rows(session):
+    from evaluate import _rows
+
+    _add_shadow(session, "NEUT.NS", ret_3d=-4.0, direction="neutral")
+    _add_shadow(session, "FAIL.NS", ret_3d=-4.0, event_type="classification_failed")
+
+    assert _rows(session, "ret_3d", shadow=True) == []
+
+
+def test_shadow_coverage_counts_withheld_rows_only(session):
+    _add(session, "SENT.NS", ret_3d=2.0)
+    _add_shadow(session, "HELD.NS", ret_3d=-9.0)
+    _add_shadow(session, "UNPRICED.NS", ret_3d=None)
+
+    cov = coverage_stats(session, "ret_3d", shadow=True)
+    assert cov["total"] == 2
+    assert cov["measured"] == 1
+    assert cov["missing_tickers"] == ["UNPRICED.NS"]
+
+
+def test_a_blocked_bucket_is_reportable_end_to_end(session):
+    # The actual P1.9 question: credit_rating never alerts, so it is absent from
+    # the normal report. The shadow report is where its record shows up.
+    from evaluate import _rows
+
+    for i, ret in enumerate([-5.0, -3.0, 1.0]):
+        a = _add_shadow(session, f"R{i}.NS", ret_3d=ret)
+        a.url = f"u-shadow-{i}"
+    session.commit()
+
+    assert _rows(session, "ret_3d") == []
+    shadow = _rows(session, "ret_3d", shadow=True)
+    assert len(shadow) == 3
+    assert {r[0] for r in shadow} == {"credit_rating"}
