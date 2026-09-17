@@ -3,9 +3,14 @@ LLM classification: event type, predicted direction, reasoning, and any
 quantifiable detail (e.g. EPS beat %) for a single news article.
 
 Three free `openai`-SDK-compatible backends, tried in order (see
-_caller_chain): Gemini (frontier-class, generous free quota — the default
-primary), Groq (fast, but a tight tokens-per-minute ceiling), and local Ollama
+_caller_chain): Groq (1000 requests/day, capped at 8000 tokens/min — the default
+primary, because volume is what this pipeline is short of), Gemini
+(frontier-class but only 20 requests/day on the free tier), and local Ollama
 (fully offline fallback). INFERENCE_BACKEND in .env can reorder which leads.
+
+Backend selection here is the throughput ceiling of the whole system, not an
+implementation detail: while Gemini led and the Groq fallback was pointed at a
+decommissioned model, 5223 of 6820 ingested filings (77%) were never classified.
 
 Free models vary in how reliably they follow strict JSON, so responses are
 validated with pydantic and, on a parse failure, retried once with a stricter
@@ -29,12 +34,28 @@ from src.ingestion.common import RawArticle
 logger = logging.getLogger(__name__)
 
 _GROQ_BASE = "https://api.groq.com/openai/v1"
-_GROQ_MODEL = "llama-3.3-70b-versatile"
+# Verified live 2026-09-17 against Groq's /models: the previous model here
+# (llama-3.3-70b-versatile) had been decommissioned and every call returned
+# 404 model_not_found. Because that failure was logged at DEBUG while the run
+# logs are at INFO, the fallback looked configured while doing nothing — so
+# once Gemini's daily quota ran out there was no backend at all and every
+# remaining article of the day was burned as classification_failed. gpt-oss-120b
+# is the replacement: 131K context, free tier, and it parses our strict-JSON
+# prompt on the first attempt (tested on results/demise/downgrade filings).
+_GROQ_MODEL = "openai/gpt-oss-120b"
 
 # Gemini free tier via its OpenAI-compatible endpoint: frontier-class accuracy at
-# zero cost (free tier: ~10 req/min, 250K tokens/min, 1,500 req/day — far above
-# Groq's 12K TPM that otherwise forces a tight per-cycle article cap). Primary
-# backend whenever GEMINI_API_KEY is set; Groq then Ollama remain as fallbacks.
+# zero cost, but the free-tier quota is TWENTY REQUESTS PER DAY for this model —
+# read verbatim from its own 429 on 2026-09-17:
+#   Quota exceeded for metric: generate_content_free_tier_requests,
+#   limit: 20, model: gemini-3.5-flash
+#   quotaId: GenerateRequestsPerDayPerProjectPerModel-FreeTier
+# That single number is the reason 77% of ingested filings were never classified:
+# the pipeline could read 20 filings a day against 150-230 arriving, the quota
+# reset at midnight Pacific (= the unexplained 07:00 UTC recovery in the failure
+# histogram), and the Groq fallback was 404ing so nothing caught the overflow.
+# Gemini is therefore now the SECOND backend — a small daily allowance of
+# best-quality reads — and Groq, at 1000 requests/day, carries the volume.
 _GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta/openai/"
 _GEMINI_MODEL = "gemini-3.5-flash"
 # response_format isn't documented for Gemini's OpenAI-compat layer, so (like
@@ -45,11 +66,35 @@ _GEMINI_MODEL = "gemini-3.5-flash"
 # because Groq's free tier caps tokens-per-minute (input+output), and a smaller
 # per-call token cost = more articles classified before hitting that ceiling.
 _MAX_TOKENS = 200
+# gpt-oss is a reasoning model and its thinking tokens count against max_tokens
+# even at reasoning_effort="low". Verified live: at 200 the budget is consumed
+# before the JSON starts and Groq rejects the call outright with
+# json_validate_failed / "max completion tokens reached". 900 leaves room.
+_GROQ_MAX_TOKENS = 900
 
-# Groq free-tier rate limiting: throttle to <=20 classification calls/min.
-_RATE_LIMIT_CALLS = 20
+# Groq free-tier limits, read live from its own response headers 2026-09-17:
+# 1000 requests/day but only 8000 TOKENS/minute. Tokens are what binds — one
+# filing costs ~1.2K tokens, or ~2.4K once a 3500-char PDF body is attached — so
+# a flat "20 calls/min" throttle (what used to be here) was ~3x over the real
+# ceiling and earned a genuine 429. Track observed usage in a rolling minute
+# instead, so short filings are not paced as if every one carried a PDF.
 _RATE_LIMIT_WINDOW_SECONDS = 60.0
-_call_timestamps: list[float] = []
+_GROQ_TPM_BUDGET = 7000
+# Charged against the budget before a call, then replaced by what Groq actually
+# billed. Observed live: ~1.2K tokens for a short filing, ~2.4K with a full
+# 3500-char PDF body attached.
+_GROQ_ASSUMED_TOKENS = 2000
+# Budget frees up over a rolling minute, so a wait can legitimately approach
+# that. Past this the cycle is better off handing the filing back to the retry
+# queue than blocking on it.
+_GROQ_MAX_WAIT_SECONDS = 45.0
+# Primary pacing. 7000 tokens/min at ~1.6K a filing is ~4.4 calls/min, so
+# spacing calls ~14s apart spends the budget evenly instead of firing a burst
+# and then stalling for the rest of the minute — which is what a pure rolling
+# window does on its own, and it starves the back half of every cycle.
+_GROQ_MIN_INTERVAL_SECONDS = 14.0
+_last_groq_call_at = 0.0
+_groq_token_window: list[tuple[float, int]] = []
 
 # Gemini free-tier RPM (~10/min): space calls at least this far apart so a full
 # cycle's worth of classifications never trips a 429. Simple min-interval
@@ -62,6 +107,17 @@ _last_gemini_call_at = 0.0
 _logged_unreachable_this_cycle = False
 _logged_rate_limited_this_cycle: set[str] = set()
 _rate_limited_backends: set[str] = set()
+# Backends that failed for a reason that will not resolve before the next call
+# (wrong model name, revoked key, malformed request). Skipped for the rest of
+# the cycle instead of being retried once per article.
+_dead_backends: set[str] = set()
+_logged_error_this_cycle: set[str] = set()
+_DEAD_STATUS_CODES = frozenset({400, 401, 403, 404})
+
+# Why the current article's classification failed, per backend. Reset at the
+# start of every classify() call and read back by the pipeline so the reason
+# lands in the DB rather than only in a log that scrolls away.
+_last_errors: dict[str, str] = {}
 
 _SYSTEM_PROMPT = """You read an Indian-stock exchange filing (or news item) and classify it. The text may be extracted from a filing PDF, so ignore letterhead/addresses/boilerplate and focus on the substance. Return ONLY a JSON object, no other text.
 
@@ -94,14 +150,22 @@ def reset_cycle_state() -> None:
     """Call at the start of each pipeline cycle so backend-unreachable/rate-limit
     warnings are logged at most once per cycle instead of once per article."""
     global _logged_unreachable_this_cycle, _logged_rate_limited_this_cycle, _rate_limited_backends
+    global _dead_backends, _logged_error_this_cycle
     _logged_unreachable_this_cycle = False
     _logged_rate_limited_this_cycle = set()
     _rate_limited_backends = set()
+    _dead_backends = set()
+    _logged_error_this_cycle = set()
 
 
 def is_rate_limited() -> bool:
-    """True only when EVERY configured cloud backend is rate-limited this cycle
-    (Ollama, local and fail-fast, isn't counted — trying it costs nothing)."""
+    """True only when EVERY configured cloud backend is unusable for the rest of
+    this cycle — rate-limited (429) or dead (bad model/key). Ollama, local and
+    fail-fast, isn't counted: trying it costs nothing.
+
+    The pipeline uses this to stop early. It matters that dead backends count:
+    while Groq was 404ing this never fired, so every article of a quota-exhausted
+    cycle was still attempted and permanently stored as classification_failed."""
     settings = get_settings()
     cloud_backends = [
         name
@@ -110,26 +174,100 @@ def is_rate_limited() -> bool:
     ]
     if not cloud_backends:
         return False
-    return all(name in _rate_limited_backends for name in cloud_backends)
+    return all(
+        name in _rate_limited_backends or name in _dead_backends for name in cloud_backends
+    )
 
 
-def _mark_rate_limited(name: str) -> None:
+def classification_failure_reason() -> str:
+    """Why the last classify() call failed, short enough to store on the row."""
+    if not _last_errors:
+        return "LLM classification failed or backend unreachable."
+    return "; ".join(f"{name}: {why}" for name, why in _last_errors.items())[:300]
+
+
+def _mark_rate_limited(name: str, reason: str = "429 rate limited") -> None:
     global _logged_rate_limited_this_cycle
     _rate_limited_backends.add(name)
+    _last_errors[name] = reason
     if name not in _logged_rate_limited_this_cycle:
-        logger.warning("classifier: %s rate limit reached this cycle", name)
+        logger.warning("classifier: %s rate limit reached this cycle (%s)", name, reason)
         _logged_rate_limited_this_cycle.add(name)
 
 
+def _note_backend_error(name: str, reason: str, dead: bool) -> None:
+    """Record why a backend call failed, and surface it at WARNING once per
+    cycle. Previously this was a DEBUG line, which is how a decommissioned Groq
+    model stayed invisible in INFO-level Actions logs."""
+    _last_errors[name] = reason
+    if dead:
+        _dead_backends.add(name)
+    if name not in _logged_error_this_cycle:
+        logger.warning(
+            "classifier: %s backend %s this cycle: %s",
+            name,
+            "unusable" if dead else "call failed",
+            reason,
+        )
+        _logged_error_this_cycle.add(name)
+
+
+def _groq_tokens_used() -> int:
+    """Tokens Groq has billed us in the last minute, pruning what has aged out."""
+    global _groq_token_window
+    cutoff = time.monotonic() - _RATE_LIMIT_WINDOW_SECONDS
+    _groq_token_window = [(t, n) for t, n in _groq_token_window if t > cutoff]
+    return sum(n for _, n in _groq_token_window)
+
+
 def _throttle_groq() -> bool:
-    now = time.monotonic()
-    global _call_timestamps
-    _call_timestamps = [t for t in _call_timestamps if now - t < _RATE_LIMIT_WINDOW_SECONDS]
-    if len(_call_timestamps) >= _RATE_LIMIT_CALLS:
-        _mark_rate_limited("groq")
-        return False
-    _call_timestamps.append(time.monotonic())
+    """Wait until this call fits inside Groq's tokens-per-minute budget.
+
+    Sleeping is the point: at ~1.6K tokens a filing, 7000 tokens/min is about
+    4 filings a minute, and pacing to that is what keeps a cycle's worth of
+    classifications from earning a real 429. False means even waiting would not
+    free enough budget soon — the filing is then left unstored and re-offered
+    next cycle rather than burning an attempt."""
+    global _last_groq_call_at
+    spacing = _GROQ_MIN_INTERVAL_SECONDS - (time.monotonic() - _last_groq_call_at)
+    if spacing > 0:
+        time.sleep(spacing)
+    _last_groq_call_at = time.monotonic()
+
+    used = _groq_tokens_used()
+    need = used + _GROQ_ASSUMED_TOKENS - _GROQ_TPM_BUDGET
+    if need > 0:
+        now = time.monotonic()
+        # Budget comes back as individual calls age out of the rolling minute,
+        # so wait for however many of the oldest it takes to cover `need` — not
+        # just the single oldest, which may not free enough on its own.
+        freed = 0
+        wait = None
+        for timestamp, tokens in sorted(_groq_token_window):
+            freed += tokens
+            if freed >= need:
+                wait = timestamp + _RATE_LIMIT_WINDOW_SECONDS - now
+                break
+        if wait is None or wait > _GROQ_MAX_WAIT_SECONDS:
+            # Our own pacing, not Groq's 429 — worth telling apart in the stored
+            # classification_error, because the fixes differ.
+            _mark_rate_limited(
+                "groq", f"local throttle: {used} tokens used in the last minute"
+            )
+            return False
+        if wait > 0:
+            time.sleep(wait)
+        _groq_tokens_used()
+    _groq_token_window.append((time.monotonic(), _GROQ_ASSUMED_TOKENS))
     return True
+
+
+def _record_groq_usage(tokens: int | None) -> None:
+    """Replace this call's assumed cost with what Groq actually billed."""
+    if not tokens or not _groq_token_window:
+        return
+    timestamp, _ = _groq_token_window[-1]
+    _groq_token_window[-1] = (timestamp, int(tokens))
 
 
 def _throttle_gemini() -> None:
@@ -198,8 +336,14 @@ def _call_backend(name: str, base_url: str, model: str, api_key: str, messages: 
         # Ollama installed but wedged) from blocking the whole cycle.
         client = OpenAI(base_url=base_url, api_key=api_key, max_retries=0, timeout=45.0)
         kwargs = {}
+        max_tokens = _MAX_TOKENS
         if name == "groq":
             kwargs["response_format"] = {"type": "json_object"}
+            # gpt-oss thinks before answering; "low" keeps that short enough to
+            # fit the JSON inside _GROQ_MAX_TOKENS. Classification needs no
+            # chain-of-thought, but unlike Gemini this backend has no "none".
+            kwargs["reasoning_effort"] = "low"
+            max_tokens = _GROQ_MAX_TOKENS
         elif name == "gemini":
             # gemini-3.5-flash is a thinking model and its reasoning tokens count
             # against max_tokens — without this the 200-token budget is consumed
@@ -208,35 +352,44 @@ def _call_backend(name: str, base_url: str, model: str, api_key: str, messages: 
             kwargs["reasoning_effort"] = "none"
         resp = client.chat.completions.create(
             model=model,
-            max_tokens=_MAX_TOKENS,
+            max_tokens=max_tokens,
             temperature=0,
             messages=messages,
             **kwargs,
         )
+        if name == "groq":
+            _record_groq_usage(getattr(getattr(resp, "usage", None), "total_tokens", None))
         return resp.choices[0].message.content
     except Exception as exc:
         status_code = getattr(exc, "status_code", None)
         if status_code == 429:
             _mark_rate_limited(name)
             return None
-        logger.debug("classifier: %s backend call failed: %s", name, exc)
+        reason = f"{type(exc).__name__}"
+        if status_code:
+            reason += f" {status_code}"
+        reason += f": {str(exc)[:160]}"
+        _note_backend_error(name, reason, dead=status_code in _DEAD_STATUS_CODES)
         return None
 
 
 def _caller_chain(settings) -> list[tuple[str, str, str, str]]:
-    """Ordered (name, base_url, model, api_key) backends to try. Gemini leads
-    when configured — frontier-class accuracy, generous free quota, no Groq-style
-    TPM ceiling. INFERENCE_BACKEND=ollama still forces Ollama first (e.g. for a
-    fully offline setup)."""
+    """Ordered (name, base_url, model, api_key) backends to try.
+
+    Groq leads by default. It is not the better model — Gemini is — but Gemini's
+    free tier allows 20 requests/day against Groq's 1000, and a filing nobody
+    reads is worth less than a filing read by the second-best model. Set
+    INFERENCE_BACKEND=gemini to put quality first on a paid key, or =ollama for
+    a fully offline setup."""
     gemini = ("gemini", _GEMINI_BASE, _GEMINI_MODEL, settings.gemini_api_key)
     groq = ("groq", _GROQ_BASE, _GROQ_MODEL, settings.groq_api_key)
     ollama = ("ollama", settings.ollama_url, settings.ollama_model, "ollama")
 
     if settings.inference_backend == "ollama":
-        return [ollama, gemini, groq]
-    if settings.inference_backend == "groq":
-        return [groq, gemini, ollama]
-    return [gemini, groq, ollama]
+        return [ollama, groq, gemini]
+    if settings.inference_backend == "gemini":
+        return [gemini, groq, ollama]
+    return [groq, gemini, ollama]
 
 
 def _call_llm(system_prompt: str, user_msg: str) -> str | None:
@@ -247,7 +400,7 @@ def _call_llm(system_prompt: str, user_msg: str) -> str | None:
     ]
 
     for name, base_url, model, api_key in _caller_chain(settings):
-        if name in _rate_limited_backends:
+        if name in _rate_limited_backends or name in _dead_backends:
             continue
         if name in ("gemini", "groq") and not api_key:
             continue
@@ -270,6 +423,7 @@ def classify(article: RawArticle) -> ClassificationResult | None:
     model's output fails validation twice (caller should store the article as
     classification_failed rather than crash)."""
     user_msg = _build_user_message(article)
+    _last_errors.clear()
 
     raw = _call_llm(_SYSTEM_PROMPT, user_msg)
     if raw is None:
@@ -287,6 +441,7 @@ def classify(article: RawArticle) -> ClassificationResult | None:
     if result is not None:
         return result
 
+    _last_errors["parse"] = f"invalid JSON after strict retry: {(raw_retry or '')[:80]!r}"
     logger.warning(
         "classifier: classification_failed for %r — raw=%r retry_raw=%r",
         article.headline[:120],

@@ -46,6 +46,20 @@ class Article(Base):
     source_quality: Mapped[float] = mapped_column(Float, default=0.0)
     is_material: Mapped[bool] = mapped_column(Boolean, default=False)
     reasoning: Mapped[str] = mapped_column(String)
+    # Set only on event_type="classification_failed": which backend failed and
+    # why ("gemini: 429 rate limited; groq: NotFoundError 404: ..."). Exists
+    # because `reasoning` carried one constant string for all 5223 failed rows,
+    # so the single largest loss in the pipeline could only be diagnosed by
+    # reading GitHub Actions logs. NULL for successfully classified rows.
+    classification_error: Mapped[str | None] = mapped_column(String, nullable=True)
+    # How many times the LLM has been asked to classify this filing. A failure
+    # used to be permanent: the row was stored, article_exists() then matched it
+    # forever, and a filing lost to a transient 429 was never seen again. Rows
+    # under MAX_CLASSIFY_ATTEMPTS are re-offered while still inside the
+    # freshness window (see src/pipeline.py). Nullable to match what the
+    # ALTER TABLE migration can produce on an existing DB file; readers treat
+    # NULL as 0.
+    classify_attempts: Mapped[int | None] = mapped_column(Integer, default=0, nullable=True)
     # True once the row has been HANDLED, which is not the same as delivered:
     # a suppressed duplicate is marked too, so it is never retried. Check
     # suppressed_reason to tell the two apart.

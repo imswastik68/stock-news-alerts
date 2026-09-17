@@ -14,7 +14,12 @@ import argparse
 import logging
 from datetime import datetime, timedelta, timezone
 
-from src.classification.classifier import classify, is_rate_limited, reset_cycle_state
+from src.classification.classifier import (
+    classification_failure_reason,
+    classify,
+    is_rate_limited,
+    reset_cycle_state,
+)
 from src.config import configure_logging, get_settings
 from src.ingestion import bse_bhavcopy
 from src.ingestion.common import RawArticle
@@ -30,10 +35,12 @@ from src.scoring.outcomes import track_outcomes
 from src.scoring.priced_in import is_priced_in
 from src.scoring.source_quality import get_source_quality, is_directional_material_alert
 from src.storage.db import (
-    article_exists,
+    find_article,
     get_pending_alert_articles,
     get_session,
+    handled_article_keys,
     headline_hash,
+    is_retryable_failure,
     save_article,
     mark_alert_sent,
     mark_alert_suppressed,
@@ -44,6 +51,13 @@ logger = logging.getLogger(__name__)
 
 _EXCLUDED_FROM_ALERTS = {"other", "classification_failed"}
 _IMPACT_RANK = {HIGH: 0, "medium": 1}
+
+# How many times a filing may be offered to the LLM before it is written off.
+# 3, not 1: measured 2026-09-17, 67 of 84 newly-seen filings in a five-hour run
+# failed classification, and every one was lost permanently because the failed
+# row itself satisfied the dedupe check. Bounded so a filing the model genuinely
+# cannot parse doesn't occupy a classification slot forever.
+MAX_CLASSIFY_ATTEMPTS = 3
 
 
 def _trim_articles_for_cycle(articles: list[RawArticle], max_articles: int) -> list[RawArticle]:
@@ -105,7 +119,36 @@ def _dedup_by_url(articles: list[RawArticle]) -> list[RawArticle]:
     return deduped
 
 
-def _gather_articles(settings) -> list[RawArticle]:
+def _drop_already_handled(session, articles: list[RawArticle]) -> list[RawArticle]:
+    """Remove filings already stored (and not awaiting a retry).
+
+    This runs BEFORE the per-cycle cap, and that ordering is the whole point.
+    With the cap applied first, the 10 slots were filled by whatever ranked
+    highest in the 48h feed — almost always filings classified hours earlier.
+    Measured over a five-hour production run: every one of 132 cycles fetched
+    exactly 10 articles, and 85 of them contained no new filing at all."""
+    if not articles:
+        return articles
+    seen_urls, seen_hashes = handled_article_keys(
+        session,
+        [a.url for a in articles],
+        [headline_hash(a.headline) for a in articles],
+        MAX_CLASSIFY_ATTEMPTS,
+    )
+    kept = [
+        a for a in articles
+        if a.url not in seen_urls and headline_hash(a.headline) not in seen_hashes
+    ]
+    if len(kept) < len(articles):
+        logger.info(
+            "pipeline: skipped %d already-handled filing(s); %d candidate(s) left",
+            len(articles) - len(kept),
+            len(kept),
+        )
+    return kept
+
+
+def _gather_articles(session, settings) -> list[RawArticle]:
     """The exchange-filing backbone: NSE (date-range API depth + RSS freshness)
     and BSE (RSS — BSE's JSON API blocks scripted access), market-wide."""
     articles: list[RawArticle] = []
@@ -137,18 +180,25 @@ def _gather_articles(settings) -> list[RawArticle]:
         )
 
     kept = _filter_recent_articles(kept, settings.max_news_age_hours)
+    kept = _drop_already_handled(session, kept)
     return _trim_articles_for_cycle(kept, settings.max_articles_per_cycle)
 
 
 def _process_article(session, confidence_provider, settings, raw: RawArticle) -> dict:
     """Returns a small outcome dict for cycle-summary counting. Never raises —
     all failure modes are caught and logged."""
-    outcome = {"new": False, "classified": False, "alerted": False}
+    outcome = {"new": False, "retried": False, "classified": False, "alerted": False}
 
     h_hash = headline_hash(raw.headline)
-    if article_exists(session, raw.url, h_hash):
+    # _gather_articles already dropped handled filings in bulk; this re-check
+    # catches the same filing appearing twice within one cycle's fetch, and
+    # tells a first sighting apart from a retry of a failed classification.
+    existing = find_article(session, raw.url, h_hash)
+    if existing is not None and not is_retryable_failure(existing, MAX_CLASSIFY_ATTEMPTS):
         return outcome
-    outcome["new"] = True
+    outcome["new"] = existing is None
+    outcome["retried"] = existing is not None
+    attempts = (existing.classify_attempts or 0) if existing is not None else 0
 
     source_quality = get_source_quality(raw.source)
     impact_tier = category_impact(raw.category)
@@ -216,6 +266,9 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
                 direction="neutral",
                 confidence=0.0,
                 reasoning="LLM classification failed or backend unreachable.",
+                classification_error=classification_failure_reason(),
+                classify_attempts=attempts + 1,
+                existing=existing,
             )
         except Exception as exc:
             logger.error("pipeline: failed to store classification_failed article: %s", exc)
@@ -251,6 +304,8 @@ def _process_article(session, confidence_provider, settings, raw: RawArticle) ->
             source_quality=source_quality,
             is_material=is_material,
             reasoning=result.reason,
+            classify_attempts=attempts + 1,
+            existing=existing,
         )
     except Exception as exc:
         logger.error("pipeline: failed to store article %r: %s", raw.headline[:80], exc)
@@ -363,25 +418,30 @@ def run_pipeline() -> dict:
     settings = get_settings()
     reset_cycle_state()
 
-    fetched = _gather_articles(settings)
-    logger.info("pipeline: %d article(s) fetched this cycle", len(fetched))
-
     session = get_session()
+    fetched = _gather_articles(session, settings)
+    logger.info("pipeline: %d article(s) to classify this cycle", len(fetched))
+
     # Calibrated confidence: static prior shrunk toward measured hit-rates.
     confidence_provider = BacktestedConfidenceProvider(session, settings.confidence_base_rates)
-    totals = {"fetched": len(fetched), "new": 0, "classified": 0, "alerted": 0}
+    totals = {"fetched": len(fetched), "new": 0, "retried": 0, "classified": 0, "alerted": 0}
 
     try:
         for raw in fetched:
             if is_rate_limited():
-                logger.warning("pipeline: stopping classification early because Groq is rate limited")
+                # Stopping here leaves the remaining filings unstored, so the
+                # next cycle re-offers them. Continuing would burn an attempt
+                # each against a backend that is known to be unusable.
+                logger.warning(
+                    "pipeline: stopping classification early — no usable LLM backend this cycle"
+                )
                 break
             try:
                 outcome = _process_article(session, confidence_provider, settings, raw)
             except Exception as exc:
                 logger.error("pipeline: unexpected error processing %r: %s", raw.headline[:80], exc)
                 continue
-            for key in ("new", "classified", "alerted"):
+            for key in ("new", "retried", "classified", "alerted"):
                 totals[key] += int(outcome[key])
         totals["alerted"] += _send_pending_alerts(session, settings)
         # Measurement loop: fill in matured forward returns for past alerts, which
@@ -418,8 +478,9 @@ def run_pipeline() -> dict:
         session.close()
 
     logger.info(
-        "pipeline: cycle complete — fetched=%d new=%d classified=%d alerted=%d",
-        totals["fetched"], totals["new"], totals["classified"], totals["alerted"],
+        "pipeline: cycle complete — fetched=%d new=%d retried=%d classified=%d alerted=%d",
+        totals["fetched"], totals["new"], totals["retried"],
+        totals["classified"], totals["alerted"],
     )
     return totals
 

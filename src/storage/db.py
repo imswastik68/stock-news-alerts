@@ -60,6 +60,8 @@ def _ensure_schema(engine) -> None:
         "idx_ret_5d": "ALTER TABLE articles ADD COLUMN idx_ret_5d FLOAT",
         "suppressed_reason": "ALTER TABLE articles ADD COLUMN suppressed_reason VARCHAR",
         "entry_basis": "ALTER TABLE articles ADD COLUMN entry_basis VARCHAR",
+        "classification_error": "ALTER TABLE articles ADD COLUMN classification_error VARCHAR",
+        "classify_attempts": "ALTER TABLE articles ADD COLUMN classify_attempts INTEGER DEFAULT 0",
     }
     with engine.begin() as conn:
         for column, ddl in additions.items():
@@ -72,11 +74,59 @@ def headline_hash(headline: str) -> str:
     return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
 
 
-def article_exists(session: Session, url: str, h_hash: str) -> bool:
-    stmt = select(Article.id).where(
+def find_article(session: Session, url: str, h_hash: str) -> Article | None:
+    stmt = select(Article).where(
         (Article.url == url) | (Article.headline_hash == h_hash)
     )
-    return session.execute(stmt).first() is not None
+    return session.execute(stmt).scalars().first()
+
+
+def is_retryable_failure(article: Article, max_classify_attempts: int) -> bool:
+    """A stored row the LLM never actually read, still inside its attempt budget.
+
+    Classification failure used to be permanent — the row was written, matched
+    by the dedupe check forever after, and the filing was never classified. On
+    2026-09-17 that accounted for 5223 of 6820 stored articles (77%), almost all
+    of them lost to a Gemini 429 or to the Groq fallback silently 404ing."""
+    return (
+        article.event_type == "classification_failed"
+        and (article.classify_attempts or 0) < max_classify_attempts
+    )
+
+
+# SQLite's default host-parameter ceiling is 999; chunk well under it.
+_IN_CHUNK = 400
+
+
+def handled_article_keys(
+    session: Session,
+    urls: list[str],
+    hashes: list[str],
+    max_classify_attempts: int,
+) -> tuple[set[str], set[str]]:
+    """(urls, headline hashes) of stored articles NOT worth offering the
+    classifier again — everything already stored except retryable failures.
+
+    Bulk form of find_article(), so the pipeline can drop already-handled
+    filings BEFORE the per-cycle classification cap is applied rather than
+    after. Two IN queries per cycle instead of one SELECT per candidate."""
+    seen_urls: set[str] = set()
+    seen_hashes: set[str] = set()
+    for keys, column in ((urls, Article.url), (hashes, Article.headline_hash)):
+        keys = list(keys)
+        for start in range(0, len(keys), _IN_CHUNK):
+            stmt = select(
+                Article.url,
+                Article.headline_hash,
+                Article.event_type,
+                Article.classify_attempts,
+            ).where(column.in_(keys[start : start + _IN_CHUNK]))
+            for url, h_hash, event_type, attempts in session.execute(stmt):
+                if event_type == "classification_failed" and (attempts or 0) < max_classify_attempts:
+                    continue
+                seen_urls.add(url)
+                seen_hashes.add(h_hash)
+    return seen_urls, seen_hashes
 
 
 def save_article(
@@ -98,8 +148,16 @@ def save_article(
     is_material: bool = False,
     category: str = "",
     impact_tier: str = "",
+    classification_error: str | None = None,
+    classify_attempts: int = 0,
+    existing: Article | None = None,
 ) -> Article:
-    article = Article(
+    """Insert a new article row, or rewrite `existing` in place.
+
+    The in-place path exists for retried classification failures: the row is
+    already stored (and `url` is unique), so a later successful attempt has to
+    overwrite it rather than insert a second copy."""
+    fields = dict(
         ticker=ticker,
         company_name=company_name,
         headline=headline,
@@ -117,9 +175,16 @@ def save_article(
         source_quality=source_quality,
         is_material=is_material,
         reasoning=reasoning,
-        alert_sent=False,
+        classification_error=classification_error,
+        classify_attempts=classify_attempts,
     )
-    session.add(article)
+    if existing is not None:
+        for key, value in fields.items():
+            setattr(existing, key, value)
+        article = existing
+    else:
+        article = Article(alert_sent=False, **fields)
+        session.add(article)
     session.commit()
     session.refresh(article)
     return article

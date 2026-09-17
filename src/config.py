@@ -95,7 +95,11 @@ def get_settings() -> Settings:
         high_tier_threshold = float(env_high_tier)
 
     _settings = Settings(
-        inference_backend=os.environ.get("INFERENCE_BACKEND", "gemini").lower(),
+        # Groq, not Gemini: see _caller_chain in src/classification/classifier.py.
+        # Gemini's free tier is 20 requests/day, which is what made 77% of
+        # ingested filings go unclassified. GitHub Actions sets no
+        # INFERENCE_BACKEND, so this default is what production actually runs.
+        inference_backend=os.environ.get("INFERENCE_BACKEND", "groq").lower(),
         gemini_api_key=os.environ.get("GEMINI_API_KEY", ""),
         groq_api_key=os.environ.get("GROQ_API_KEY", ""),
         ollama_url=os.environ.get("OLLAMA_URL", "http://localhost:11434/v1"),

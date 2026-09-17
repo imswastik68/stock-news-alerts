@@ -7,6 +7,8 @@ from __future__ import annotations
 import types
 from unittest.mock import patch
 
+import pytest
+
 from src.classification import classifier
 from src.ingestion.common import RawArticle
 from datetime import datetime, timezone
@@ -16,6 +18,13 @@ VALID_JSON = (
     '"reason": "EPS beat consensus by 12%", "magnitude_pct": 12.0, '
     '"materiality_score": 0.88, "impact_horizon": "1_3_days"}'
 )
+
+
+@pytest.fixture
+def no_groq_spacing(monkeypatch):
+    """Drop the 14s inter-call pacing so throttle tests don't really sleep."""
+    monkeypatch.setattr(classifier, "_GROQ_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(classifier, "_last_groq_call_at", 0.0)
 
 
 def _fake_settings():
@@ -163,7 +172,16 @@ def _settings(inference_backend="gemini", gemini_key="g-key", groq_key="q-key"):
     )
 
 
-def test_caller_chain_default_prefers_gemini():
+def test_caller_chain_defaults_to_groq_for_throughput():
+    """Gemini classifies better but allows 20 requests/day on the free tier;
+    Groq allows 1000. Both numbers read live from the providers on 2026-09-17.
+    With Gemini leading, the pipeline could read 20 of the ~200 filings that
+    arrive each day."""
+    names = [c[0] for c in classifier._caller_chain(_settings(inference_backend=""))]
+    assert names == ["groq", "gemini", "ollama"]
+
+
+def test_caller_chain_gemini_backend_forces_gemini_first():
     names = [c[0] for c in classifier._caller_chain(_settings(inference_backend="gemini"))]
     assert names == ["gemini", "groq", "ollama"]
 
@@ -175,7 +193,38 @@ def test_caller_chain_groq_backend_forces_groq_first():
 
 def test_caller_chain_ollama_backend_forces_ollama_first():
     names = [c[0] for c in classifier._caller_chain(_settings(inference_backend="ollama"))]
-    assert names == ["ollama", "gemini", "groq"]
+    assert names == ["ollama", "groq", "gemini"]
+
+
+# ── Groq's ceiling is tokens per minute, not calls per minute ────────────────
+
+
+def test_groq_throttle_paces_on_observed_token_usage(no_groq_spacing):
+    classifier.reset_cycle_state()
+    classifier._groq_token_window.clear()
+    assert classifier._throttle_groq() is True
+    # A short filing costs far less than the assumed budget; recording the real
+    # figure must free that headroom back up for the next call.
+    classifier._record_groq_usage(900)
+    assert classifier._groq_tokens_used() == 900
+    classifier._groq_token_window.clear()
+
+
+def test_groq_throttle_gives_up_rather_than_blocking_a_whole_cycle(no_groq_spacing):
+    import time as _time
+
+    classifier.reset_cycle_state()
+    classifier._groq_token_window.clear()
+    # A full minute's budget spent one second ago: waiting it out would stall
+    # the cycle, so the filing goes back to the retry queue instead.
+    classifier._groq_token_window.append(
+        (_time.monotonic() - 1.0, classifier._GROQ_TPM_BUDGET)
+    )
+    assert classifier._throttle_groq() is False
+    assert "groq" in classifier._rate_limited_backends
+    assert "local throttle" in classifier._last_errors["groq"]
+    classifier._groq_token_window.clear()
+    classifier.reset_cycle_state()
 
 
 def test_is_rate_limited_false_with_no_cloud_backends_configured():
@@ -229,3 +278,67 @@ def test_system_prompt_requires_crore_output_and_forbids_bare_copying():
     p = classifier._SYSTEM_PROMPT.lower()
     assert "always express money in crore" in p
     assert "never copy the digits across unconverted" in p
+
+
+# ── a broken backend must be loud, and must not be retried per article ───────
+# The Groq fallback pointed at llama-3.3-70b-versatile long after Groq
+# decommissioned it. Every call returned 404 model_not_found, and that was
+# logged at DEBUG while production runs at INFO — so the fallback read as
+# configured while doing nothing, and once Gemini's daily quota ran out there
+# was no backend at all. Verified live 2026-09-17 against Groq's /models.
+
+
+def test_a_404_marks_the_backend_dead_for_the_rest_of_the_cycle():
+    classifier.reset_cycle_state()
+    exc = RuntimeError("model_not_found")
+    exc.status_code = 404
+    with patch("openai.OpenAI", side_effect=exc):
+        assert classifier._call_backend("groq", "u", "m", "k", []) is None
+    assert "groq" in classifier._dead_backends
+    classifier.reset_cycle_state()
+
+
+def test_a_transient_error_does_not_mark_the_backend_dead():
+    classifier.reset_cycle_state()
+    with patch("openai.OpenAI", side_effect=TimeoutError("read timeout")):
+        assert classifier._call_backend("gemini", "u", "m", "k", []) is None
+    assert "gemini" not in classifier._dead_backends
+    assert "gemini" in classifier._last_errors
+    classifier.reset_cycle_state()
+
+
+def test_dead_backends_count_toward_stopping_the_cycle():
+    """is_rate_limited() drives the pipeline's early stop. While Groq 404'd it
+    was never marked, so the pipeline kept feeding articles to a chain with no
+    working backend and stored each one as a permanent classification_failed."""
+    classifier.reset_cycle_state()
+    with patch.object(classifier, "get_settings", lambda: _settings()):
+        classifier._mark_rate_limited("gemini")
+        assert classifier.is_rate_limited() is False
+        classifier._note_backend_error("groq", "NotFoundError 404: model_not_found", dead=True)
+        assert classifier.is_rate_limited() is True
+    classifier.reset_cycle_state()
+
+
+def test_failure_reason_names_every_backend_that_failed():
+    classifier.reset_cycle_state()
+    classifier._last_errors.clear()
+    classifier._mark_rate_limited("gemini")
+    classifier._note_backend_error("groq", "NotFoundError 404: model_not_found", dead=True)
+    reason = classifier.classification_failure_reason()
+    assert "gemini: 429" in reason and "groq: NotFoundError 404" in reason
+    assert len(reason) <= 300
+    classifier.reset_cycle_state()
+
+
+def test_failure_reason_falls_back_to_a_plain_string_when_nothing_was_recorded():
+    classifier.reset_cycle_state()
+    classifier._last_errors.clear()
+    assert classifier.classification_failure_reason().startswith("LLM classification failed")
+
+
+def test_groq_gets_its_own_token_budget_for_thinking():
+    # gpt-oss spends max_tokens on reasoning before the JSON starts; at the
+    # shared 200 budget Groq rejects the call with json_validate_failed.
+    assert classifier._GROQ_MAX_TOKENS > classifier._MAX_TOKENS
+    assert "llama-3.3-70b-versatile" not in classifier._GROQ_MODEL
