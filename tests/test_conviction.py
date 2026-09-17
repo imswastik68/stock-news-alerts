@@ -80,3 +80,41 @@ def test_every_plan_states_the_one_day_exit():
     # is gone by day 3 (day1->day3 leg: -0.22%, t=-0.73).
     for published_at in (INTRADAY, AFTER_CLOSE):
         assert "1 day" in trade_plan("partnership_contract", 0.8, published_at)
+
+
+# ── bearish: the alert must not encourage the obvious trade ──────────────────
+#
+# Bearish alerts are 21% of volume and come from regulatory_legal /
+# earnings_surprise / other — partnership_contract is 118 bullish, 0 bearish, so
+# the validated bucket is long-only by construction. On tradable entries the
+# short side lost on BOTH views at every horizon (raw is the one a short pays
+# out on): 1d 41.2% raw / -0.27%, 3d 46.9% / -1.19%, 5d 46.7% / -0.28%, and
+# out-of-sample only 33.3% of them saw the stock fall at all.
+
+def test_bearish_alert_says_do_not_short_not_just_no_edge():
+    line = conviction_line("regulatory_legal", 0.9, "bearish")
+    assert "Do not short" in line
+    assert "A-setup" not in line
+
+
+def test_bearish_line_quotes_the_raw_hit_rate_not_alpha():
+    # Alpha says 47% and raw says 41%; quoting alpha would flatter a trade that
+    # only pays out when the stock actually falls.
+    line = conviction_line("regulatory_legal", 0.9, "bearish")
+    assert "41%" in line and "33%" in line
+
+
+def test_bearish_never_gets_a_trade_plan():
+    for et in ("regulatory_legal", "earnings_surprise", "other", "partnership_contract"):
+        assert trade_plan(et, 0.9, INTRADAY) is None or et == "partnership_contract"
+    assert conviction_line("earnings_surprise", 0.9, "bearish").startswith("🚫")
+
+
+def test_bullish_unvalidated_still_gets_the_plain_no_edge_line():
+    line = conviction_line("earnings_surprise", 0.9, "bullish")
+    assert "No measured edge" in line
+    assert "Do not short" not in line
+
+
+def test_direction_is_optional_so_callers_without_it_still_work():
+    assert "No measured edge" in conviction_line("earnings_surprise", 0.9)

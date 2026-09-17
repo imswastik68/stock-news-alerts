@@ -147,9 +147,32 @@ the new tests caught before shipping: once a row resolved to `next_close`, the
 3d/5d horizons fell through to the close branch and silently re-measured from
 the pre-news close — the exact contamination the basis exists to prevent.
 
+**Bearish validated separately — it does not work.** The A-bucket is long-only
+by construction, not by choice: `partnership_contract` ran 118 bullish / 0
+bearish. Bearish alerts (21% of volume) come from `regulatory_legal` (28),
+`earnings_surprise` (14) and `other` (6). Both views are reported because a
+short pays out on the stock *falling*, not on it underperforming a rising
+index. Tradable entries only:
+
+| horizon | alpha hit | avg alpha | raw hit | avg raw |
+|---|---|---|---|---|
+| 1d (n=34) | 47.1% | −0.39% | 41.2% | −0.27% |
+| 3d (n=32) | 43.8% | −1.65% | 46.9% | −1.19% |
+| 5d (n=29) | 37.9% | −0.90% | 46.7% | −0.28% |
+
+Out-of-sample it degrades further: 44.4% alpha, **33.3% raw** — only a third of
+held-out bearish calls saw the stock fall at all. Across ALL delivered rows
+bearish looks mildly *positive* (+0.43% raw at 1d), but 20 of those 57 were
+after-hours filings measured from a pre-news close; removing the uncapturable
+entries flips the sign. Bearish alerts now carry an explicit "🚫 Do not short
+this alone" line quoting the raw hit-rate. Not blocked outright — n=34 with CIs
+spanning 50% is not grounds for retirement, and the news itself is real.
+
 **Open**:
 1. The A-setup bucket is n=41 (26 out-of-sample). Real, but small — worth
    re-checking around **2026-10-15** once ~4 more weeks have matured.
+1b. Bearish: re-check at n≈70 (~**2026-11**). If the raw hit-rate stays near
+   40%, retire the direction claim the way `analyst_rating` was.
 2. Every historical row is still `entry_basis` NULL and can't be recomputed
    without writing to the production DB in the Actions cache. They age out of
    the 20-day tracking window on their own; the first fully-honest read arrives

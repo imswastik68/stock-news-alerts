@@ -24,6 +24,27 @@ Holding period is one session. The same alerts decompose per-leg as:
 base->day1 +0.70% (t=+3.41), day1->day3 -0.22% (t=-0.73), day3->day5 +0.07%
 (t=+0.22). The entire edge is in the first session; after that it is noise that
 is, if anything, slightly negative. Holding longer adds variance, not return.
+
+The validated bucket is long-only by construction, not by choice:
+partnership_contract ran 118 bullish / 0 bearish — an order win is not bad news.
+Bearish alerts come from regulatory_legal, earnings_surprise and "other", and
+measured 2026-09-17 on tradable entries they do not support a short. Both the
+alpha view (did it underperform NIFTY) and the RAW view (did the stock actually
+fall — the only one a short pays out on) are negative at every horizon:
+
+  horizon  alpha hit  avg alpha   raw hit  avg raw
+  1d       47.1%      -0.39%      41.2%    -0.27%   (n=34)
+  3d       43.8%      -1.65%      46.9%    -1.19%   (n=32)
+  5d       37.9%      -0.90%      46.7%    -0.28%   (n=29)
+
+and it degrades out-of-sample rather than holding: 44.4% alpha / 33.3% raw.
+Only a third of held-out bearish calls saw the stock fall at all.
+
+Bearish looks mildly positive (+0.43% raw at 1d) across ALL delivered rows —
+but 20 of those 57 were after-hours filings measured from a pre-news close, the
+same artefact documented in market_data.get_forward_return_from_open. Removing
+the uncapturable entries flips the sign. That is the whole reason entry basis is
+tracked.
 """
 
 from __future__ import annotations
@@ -41,6 +62,13 @@ VALIDATED_MIN_MATERIALITY = 0.75
 _VALIDATED_N = 41
 _VALIDATED_OUT_OF_SAMPLE_RATE = "77%"
 
+# Bearish evidence, tradable entries only, 1d. RAW is quoted rather than alpha
+# because a short pays out on the stock actually falling, not on it
+# underperforming an index that rose.
+_BEARISH_N = 34
+_BEARISH_RAW_HIT_RATE = "41%"
+_BEARISH_OUT_OF_SAMPLE_RAW = "33%"
+
 
 def is_validated_setup(event_type: str, materiality_score: float | None) -> bool:
     """True only for the one bucket that held up on unseen data."""
@@ -50,15 +78,28 @@ def is_validated_setup(event_type: str, materiality_score: float | None) -> bool
     )
 
 
-def conviction_line(event_type: str, materiality_score: float | None) -> str:
+def conviction_line(
+    event_type: str, materiality_score: float | None, direction: str | None = None
+) -> str:
     """One line telling the reader whether this alert is in the validated bucket
     or merely material. Deliberately blunt about the second case: a 'medium
     conviction' label on a bucket measured at 44-55% out-of-sample would invent
-    a signal that isn't there."""
+    a signal that isn't there.
+
+    Bearish gets its own line rather than the generic one. "No measured edge"
+    understates it — shorting these lost money on every horizon measured, and
+    the obvious reaction to a red alert is the trade the data says not to make.
+    """
     if is_validated_setup(event_type, materiality_score):
         return (
             f"✅ <b>A-setup</b> — the one bucket with a validated edge "
             f"({_VALIDATED_OUT_OF_SAMPLE_RATE} out-of-sample, n={_VALIDATED_N})"
+        )
+    if direction == "bearish":
+        return (
+            f"🚫 <b>Do not short this alone</b> — bearish alerts have no validated "
+            f"edge: the stock fell only {_BEARISH_RAW_HIT_RATE} of the time "
+            f"(n={_BEARISH_N}), and {_BEARISH_OUT_OF_SAMPLE_RAW} out-of-sample"
         )
     return "⚪ No measured edge — material news, but this bucket is ~coin-flip out-of-sample"
 

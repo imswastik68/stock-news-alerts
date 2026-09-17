@@ -100,7 +100,9 @@ def _format_alert(article: Article, quote: dict | None = None) -> str:
     # no. The classifier's own impact_horizon is deliberately NOT shown — it
     # says "1_3_days" on 335 of 377 alerts while the measured edge is gone by
     # day 3, so printing it would advertise a holding period the data refutes.
-    lines.append(conviction_line(article.event_type, article.materiality_score))
+    lines.append(
+        conviction_line(article.event_type, article.materiality_score, article.direction)
+    )
     plan = trade_plan(article.event_type, article.materiality_score, article.published_at)
     if plan:
         lines.append(plan)
