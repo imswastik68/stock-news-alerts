@@ -27,7 +27,11 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from src.ingestion import bse_bhavcopy
-from src.scoring.market_data import get_forward_return
+from src.scoring.market_data import (
+    entry_basis_for,  # re-exported: the alerting layer needs it too
+    get_forward_return,
+    get_forward_return_from_open,
+)
 from src.storage.models import Article
 
 logger = logging.getLogger(__name__)
@@ -49,22 +53,67 @@ _HORIZONS = [
 _MAX_TRACK_AGE_DAYS = 20
 
 
-def _stock_forward_return(session: Session, ticker: str, published_at, tdays: int) -> float | None:
-    """Forward return for one alerted ticker, Yahoo first and BSE's own bhavcopy
-    as the fallback. yfinance prices nothing at all for a large share of BSE
-    scrip codes — that gap alone made 63-71 alerted rows per horizon permanently
-    unmeasurable and biased the whole track record toward the (larger, NSE-listed)
-    names it could price. Yahoo stays first because it's already cached per
-    process and covers every .NS ticker; bhavcopy only runs when Yahoo has
-    nothing AND the ticker is a BSE scrip."""
-    ret = get_forward_return(ticker, published_at, tdays)
-    if ret is not None:
-        return ret
+def _bhavcopy(session: Session, ticker: str, from_dt, tdays: int) -> float | None:
     try:
-        return bse_bhavcopy.get_forward_return(session, ticker, published_at, tdays)
+        return bse_bhavcopy.get_forward_return(session, ticker, from_dt, tdays)
     except Exception as exc:
         logger.debug("outcomes: bhavcopy fallback failed for %s: %s", ticker, exc)
         return None
+
+
+def _stock_forward_return(
+    session: Session, ticker: str, published_at, tdays: int, basis: str
+) -> tuple[float | None, str]:
+    """(forward return, the entry basis actually used) for one alerted ticker.
+
+    Yahoo first, BSE's own bhavcopy as the fallback. yfinance prices nothing at
+    all for a large share of BSE scrip codes — that gap alone made 63-71 alerted
+    rows per horizon permanently unmeasurable and biased the whole track record
+    toward the (larger, NSE-listed) names it could price. Yahoo stays first
+    because it's already cached per process and covers every .NS ticker;
+    bhavcopy only runs when Yahoo has nothing AND the ticker is a BSE scrip.
+
+    The basis can come back different from the one asked for: bhavcopy stores
+    EOD closes only, so a "next_open" request it has to serve falls back to the
+    next session's CLOSE. That is still an honest post-news entry — the gap has
+    already happened by then — just more conservative than the open, and the
+    caller records which one was used so alpha is computed against a matching
+    index leg."""
+    if basis == "next_open":
+        ret = get_forward_return_from_open(ticker, published_at, tdays)
+        if ret is not None:
+            return ret, "next_open"
+        next_day = published_at.date() + timedelta(days=1)
+        ret = _bhavcopy(session, ticker, next_day, tdays)
+        return (ret, "next_close") if ret is not None else (None, basis)
+
+    if basis == "next_close":
+        # An earlier horizon already resolved this row to a next-session-close
+        # entry. Every remaining horizon has to start from that same entry —
+        # falling through to the close branch below would quietly re-measure
+        # 3d and 5d from the pre-news close this basis exists to avoid.
+        next_day = published_at.date() + timedelta(days=1)
+        ret = get_forward_return(ticker, next_day, tdays)
+        if ret is None:
+            ret = _bhavcopy(session, ticker, next_day, tdays)
+        return (ret, "next_close") if ret is not None else (None, basis)
+
+    ret = get_forward_return(ticker, published_at, tdays)
+    if ret is None:
+        ret = _bhavcopy(session, ticker, published_at, tdays)
+    return (ret, "close") if ret is not None else (None, basis)
+
+
+def _index_forward_return(published_at, tdays: int, basis: str) -> float | None:
+    """NIFTY 50 return over the same window AND the same entry basis as the
+    stock leg. Mixing bases would silently corrupt alpha: a next-open stock
+    entry measured against a prior-close index entry hands the index the
+    overnight gap that the stock leg deliberately gave up."""
+    if basis == "next_open":
+        return get_forward_return_from_open(_BENCHMARK_TICKER, published_at, tdays)
+    if basis == "next_close":
+        return get_forward_return(_BENCHMARK_TICKER, published_at.date() + timedelta(days=1), tdays)
+    return get_forward_return(_BENCHMARK_TICKER, published_at, tdays)
 
 
 def track_outcomes(session: Session, limit: int = 60) -> int:
@@ -93,14 +142,23 @@ def track_outcomes(session: Session, limit: int = 60) -> int:
             .limit(limit - recorded)
         )
         for article in session.execute(stmt).scalars():
+            # A stored basis wins over a freshly derived one: the stock and index
+            # legs are filled on independent passes, and the index must use
+            # whatever the stock leg actually resolved to (bhavcopy can downgrade
+            # next_open to next_close) or alpha subtracts mismatched windows.
+            basis = article.entry_basis or entry_basis_for(article.published_at)
+
             if getattr(article, col) is None:
-                ret = _stock_forward_return(session, article.ticker, article.published_at, tdays)
+                ret, basis = _stock_forward_return(
+                    session, article.ticker, article.published_at, tdays, basis
+                )
                 if ret is not None:
                     setattr(article, col, round(ret, 2))
+                    article.entry_basis = basis
                     recorded += 1
 
             if getattr(article, idx_col) is None:
-                idx_ret = get_forward_return(_BENCHMARK_TICKER, article.published_at, tdays)
+                idx_ret = _index_forward_return(article.published_at, tdays, basis)
                 if idx_ret is not None:
                     setattr(article, idx_col, round(idx_ret, 2))
                     recorded += 1

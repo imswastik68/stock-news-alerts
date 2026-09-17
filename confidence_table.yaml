@@ -54,9 +54,22 @@ high_tier_confidence_threshold: 0.35
 #                     chance at EVERY horizon, measured 2026-08-11. A promoter
 #                     buying or selling turns out to say little about the next
 #                     few days' direction.
+#   analyst_rating:   retired 2026-09-17 on a weaker but one-directional case.
+#                     Unlike the two above it is not below chance on hit-rate
+#                     (54.5% at 1d), so the evidence is AVERAGE ALPHA, which is
+#                     negative at every horizon and gets worse with time --
+#                     tradable entries only: -0.44% / -1.54% / -1.69% at
+#                     1d/3d/5d (n=33/31/29, t = -1.21/-1.88/-1.48). Holdout
+#                     agrees: negative avg alpha in BOTH halves. No single cut
+#                     clears p<0.05, but six independent cuts all lean the same
+#                     way, and it was ~15% of alert volume. Winning slightly
+#                     more than half the time while losing more per trade than
+#                     it wins is a losing alert, so it stops claiming a
+#                     direction. Revisit if a larger sample turns it positive.
 directionally_unreliable_event_types:
   - ma_deal
   - insider_activity
+  - analyst_rating
 
 # Suppress a BULLISH alert when the stock has already risen this much over the
 # 5 sessions before the filing -- "buy the rumour, sell the news". Measured on

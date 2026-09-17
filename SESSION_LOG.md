@@ -44,7 +44,10 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
   ticker + event_type + direction within 24h = same event, regardless of
   wording), `outcomes.py` (tracks forward returns per alert, yfinance first
   then `bse_bhavcopy` fallback), `market_data.py` (quotes, prior/forward
-  return helpers).
+  return helpers, and `entry_basis_for()` — whether an alert's measured entry
+  price was one a trader could actually have been filled at),
+  `conviction.py` (the one out-of-sample-validated setup, and the entry/exit
+  plan shown in the alert).
 - **Pipeline** (`src/pipeline.py`): one cycle = gather articles → dedup →
   classify → score/gate → alert → repair frozen tickers → track outcomes →
   prune cached BSE closes. Every article is wrapped in its own try/except;
@@ -53,7 +56,9 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
   thresholds, per-event-type calibration — tune here, not in code).
 - **Evaluation**: `evaluate.py` computes the live track record (hit-rate,
   alpha vs index, Wilson CIs, coverage) from the production DB. Run this to
-  check "is the system actually working," not the pipeline logs.
+  check "is the system actually working," not the pipeline logs. It also
+  breaks the record down by `entry_basis` — if the edge only appears on rows
+  whose entry price was never tradable, there is no edge.
 
 ## Known structural limits (not bugs, just ceilings)
 
@@ -70,6 +75,90 @@ Actions cron (`news_scan.yml`) plus a periodic self-test
 ---
 
 ## Log
+
+### 2026-09-17 (later) — Most of the measured "edge" was an entry price nobody could trade
+
+**The finding.** `get_forward_return()` measures from the first close on/after
+the alert date. For a filing released after 15:30 IST that close printed
+*before the news existed*, so the overnight gap reaction was being counted as
+alpha — a move no order could ever have caught. Splitting the 271 delivered
+alerts by whether their base price was actually reachable:
+
+| entry base | n | 1d alpha hit-rate | avg alpha | t |
+|---|---|---|---|---|
+| tradable (news public before the base close) | 181 | 63.0% | **+0.26%** | +1.44 |
+| contaminated (after-hours filing) | 52 | 69.2% | **+1.75%** | +2.88 |
+
+22% of alerts were carrying most of the reported average alpha, and none of it
+was capturable. The honest headline number is +0.26%/day, not +0.59%.
+
+**Fixed**: `market_data.entry_basis_for()` classifies each alert, and
+`get_forward_return_from_open()` measures after-hours alerts from the next
+session's OPEN (exposure normalised to N bars, so both bases stay comparable).
+The index leg follows the same basis — mixing them would hand NIFTY a gap the
+stock leg deliberately gave up. New `entry_basis` column records which was
+used; BSE-only scrips have no open in bhavcopy so they downgrade to
+`next_close`, honest but more conservative. Legacy rows stay NULL and
+`evaluate.py` labels them as an upper bound.
+
+**Answering "is it a 1-day trend?" properly.** Cumulative hit-rates across
+different row sets can't separate "gave it back" from "different sample", so
+this decomposes per-leg on the 207 rows holding all three horizons:
+
+| leg | win% | avg alpha | t |
+|---|---|---|---|
+| base → day 1 | 66.7% | +0.70% | **+3.41** |
+| day 1 → day 3 | 44.4% | −0.22% | −0.73 |
+| day 3 → day 5 | 45.9% | +0.07% | +0.22 |
+
+The move does **not** reverse — leg B is not significantly different from zero.
+The edge simply *stops* after the first session. Holding longer adds variance,
+not return. Conditioning leg B on whether day 1 worked changes nothing
+(44.9% vs 43.5%), i.e. no momentum and no mean-reversion to trade.
+
+**Only one bucket survives a holdout** (tradable rows only, split 2026-08-25):
+
+| bucket | ALL | IN | OUT |
+|---|---|---|---|
+| partnership_contract & mat≥0.75 | 80.5% +0.84% | 86.7% +1.20% | **76.9% +0.64%** |
+| partnership_contract & mat<0.75 | 57.1% +0.22% | 62.5% +0.61% | 52.6% −0.11% |
+| other event types & mat≥0.75 | 62.0% −0.05% | 66.7% +0.58% | 55.0% −0.99% |
+| other event types & mat<0.75 | 54.5% +0.12% | 71.4% +0.74% | 44.1% −0.26% |
+
+The last row (71.4% → 44.1%) is what an overfit subset looks like and is why
+the split exists. `src/scoring/conviction.py` encodes only the first bucket;
+alerts now carry either "A-setup" with an explicit entry/exit plan, or a blunt
+"no measured edge". The plan's entry follows `entry_basis_for()`, so it matches
+how the edge was measured. The classifier's own `impact_horizon` is no longer
+printed — it says `1_3_days` on 335 of 377 alerts, which the leg table refutes.
+
+**Retired `analyst_rating`** (closes open item 1). Weaker case than `ma_deal`:
+its hit-rate is not below chance (54.5% at 1d), so the evidence is average
+alpha, negative at every horizon and worsening — tradable-only −0.44% / −1.54%
+/ −1.69% at 1d/3d/5d (t = −1.21/−1.88/−1.48), negative in both holdout halves.
+No single cut clears p<0.05; six independent cuts lean the same way and it was
+~15% of volume. Winning slightly more often while losing more per trade is a
+losing alert.
+
+**Verified**: 192 tests green (was 183 + 9 new). `evaluate.py` runs against the
+15MB production DB copy and correctly reports every historical row as `legacy`
+with the upper-bound warning. Config loads all three retired event types. A bug
+the new tests caught before shipping: once a row resolved to `next_close`, the
+3d/5d horizons fell through to the close branch and silently re-measured from
+the pre-news close — the exact contamination the basis exists to prevent.
+
+**Open**:
+1. The A-setup bucket is n=41 (26 out-of-sample). Real, but small — worth
+   re-checking around **2026-10-15** once ~4 more weeks have matured.
+2. Every historical row is still `entry_basis` NULL and can't be recomputed
+   without writing to the production DB in the Actions cache. They age out of
+   the 20-day tracking window on their own; the first fully-honest read arrives
+   around **2026-10-07**.
+3. Volume after retiring `analyst_rating` should drop ~15% (≈6.2/day). If the
+   A-setup rate stays near 1/day, the useful signal is a small fraction of what
+   gets sent — consider whether the non-A alerts are worth sending at all.
+4. Still unaddressed from the entry below: the `suppressed_reason` backfill,
+   which needs the same production-DB write authorization.
 
 ### 2026-09-17 — First clean track-record read; fixed a blind selftest and a diluted metric
 
@@ -110,7 +199,11 @@ Confirmed on a time-split holdout (split 2026-08-24, second half untouched):
   out-of-sample, and is *worse* than taking everything (57.9% vs 59.8%).
   Materiality ranks better and holds up (mat ≥0.75 → 63.9% at 1d).
 
-**Open / recommended, not yet done** (deliberately left as decisions):
+**Open / recommended, not yet done** (deliberately left as decisions).
+*Superseded by the entry above: 1, 2 and 3 were actioned on 2026-09-17 —
+`analyst_rating` is retired, `impact_horizon` is no longer shown in alerts, and
+conviction is now decided by `event_type × materiality` rather than confidence.
+4 is still open.*
 1. Retire `analyst_rating` the way `ma_deal` was — it is 15% of volume for no
    measured edge.
 2. Alerts advertise `impact_horizon: 1_3_days` (335 of 377) but the measured

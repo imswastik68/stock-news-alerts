@@ -242,5 +242,5 @@ def test_rows_with_null_idx_ret_kept_for_raw_but_excluded_from_alpha(session):
     rows = _rows(session, "ret_3d")
     assert len(rows) == 2  # both counted in raw stats
 
-    alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx in rows if idx is not None]
+    alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx, _ in rows if idx is not None]
     assert len(alpha_rows) == 1  # only the one with a recorded index leg

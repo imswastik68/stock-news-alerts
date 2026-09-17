@@ -59,6 +59,23 @@ class Article(Base):
     # down by ~5 points and feeding the same noise into confidence calibration.
     suppressed_reason: Mapped[str | None] = mapped_column(String, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    # Which entry price ret_Nd below is measured from — set by
+    # src/scoring/outcomes.py when the return is recorded:
+    #   "close"      news was already public when that session's close printed,
+    #                so the close is a price an order could have been filled at.
+    #   "next_open"  news broke AFTER the close, so the return starts at the NEXT
+    #                session's open.
+    #   "next_close" same case, but the scrip is BSE-only and bhavcopy carries no
+    #                open prices, so entry is the next session's close instead —
+    #                honest, just more conservative than the open.
+    #   NULL         legacy row measured before 2026-09-17, always on a close
+    #                base. For an after-hours row that base pre-dates the news,
+    #                so the value silently contains an uncapturable overnight gap.
+    # This is not bookkeeping: measuring an after-hours alert from the prior
+    # close books the gap reaction as alpha. On 271 delivered alerts the
+    # after-hours bucket showed +1.75% avg 1d alpha that way, against +0.26% for
+    # rows with a genuinely tradable base — nearly the whole apparent edge.
+    entry_basis: Mapped[str | None] = mapped_column(String, nullable=True)
     # Outcome tracking (filled in later by src/scoring/outcomes.py for alerted
     # rows): forward % return of the stock over N trading days from the alert.
     # NULL until that horizon has matured. Feeds the calibrated confidence model.

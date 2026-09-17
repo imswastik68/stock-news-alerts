@@ -16,6 +16,7 @@ import math
 import telegram
 
 from src.config import get_settings
+from src.scoring.conviction import conviction_line, trade_plan
 from src.storage.models import Article
 
 logger = logging.getLogger(__name__)
@@ -94,9 +95,17 @@ def _format_alert(article: Article, quote: dict | None = None) -> str:
     price_line = _format_price_line(quote)
     if price_line:
         lines.append(_e(price_line))
+    # Conviction and trade plan come before the prose: the reader's first
+    # question is "do I act on this", and the honest answer for most alerts is
+    # no. The classifier's own impact_horizon is deliberately NOT shown — it
+    # says "1_3_days" on 335 of 377 alerts while the measured edge is gone by
+    # day 3, so printing it would advertise a holding period the data refutes.
+    lines.append(conviction_line(article.event_type, article.materiality_score))
+    plan = trade_plan(article.event_type, article.materiality_score, article.published_at)
+    if plan:
+        lines.append(plan)
     lines += [
-        f"Confidence: {confidence_pct}%",
-        f"Materiality: {round(article.materiality_score * 100)}% | Horizon: {_e(article.impact_horizon)}",
+        f"Confidence: {confidence_pct}% | Materiality: {round(article.materiality_score * 100)}%",
         f'"{_e(article.headline)}"',
         f"Reason: {_e(article.reasoning)}",
         f'🔗 <a href="{_e(article.url)}">Read more</a>',

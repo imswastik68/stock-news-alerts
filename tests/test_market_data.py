@@ -158,3 +158,104 @@ def test_forward_return_computed_correctly_for_a_normal_case():
         ret = get_forward_return("Z.NS", today - timedelta(days=10), trading_days=3)
     assert ret is not None
     assert ret > 0  # prices are monotonically increasing in the fixture
+
+
+# ── get_forward_return_from_open: the tradable entry for after-hours news ────
+#
+# A filing released after 15:30 IST is followed by a close that printed before
+# the news existed. get_forward_return() measures from exactly that close, so
+# the overnight gap reaction lands inside the number even though no order could
+# have been filled at the base. Measured on 271 delivered alerts (2026-09-17):
+# the after-hours bucket scored +1.75% avg 1d alpha that way against +0.26% for
+# rows with a genuinely tradable base — nearly the whole apparent edge was this
+# artefact. Entering at the next open prices the gap out.
+
+def _ohlc(n_days: int, today: date, opens: list[float], closes: list[float]):
+    idx = pd.date_range(end=pd.Timestamp(today), periods=n_days, freq="D")
+    return pd.DataFrame({"Open": opens, "Close": closes}, index=idx)
+
+
+def _seed(frame):
+    market_data._close_cache.clear()
+    market_data._open_cache.clear()
+    return patch("yfinance.Ticker", **{"return_value.history.return_value": frame})
+
+
+def test_open_basis_starts_at_the_next_bar_not_the_news_day_close():
+    # Flat 100 closes, but every open is 90 — a gap DOWN to the open. Measuring
+    # from the prior close gives 0%; measuring from the tradable open gives
+    # +11.1%. The two must not agree, or the gap is still being counted.
+    today = date.today()
+    n = 60
+    frame = _ohlc(n, today, opens=[90.0] * n, closes=[100.0] * n)
+    with _seed(frame):
+        from_open = market_data.get_forward_return_from_open(
+            "G.NS", today - timedelta(days=10), trading_days=1)
+    with _seed(frame):
+        from_close = get_forward_return("G.NS", today - timedelta(days=10), trading_days=1)
+
+    assert from_close == 0.0
+    assert from_open is not None and round(from_open, 1) == 11.1
+
+
+def _first_bar_after(frame, from_date):
+    """Index of the first bar strictly after `from_date` — the entry bar."""
+    return next(i for i, ts in enumerate(frame.index) if ts.date() > from_date)
+
+
+def test_open_basis_spans_the_same_number_of_bars_as_the_close_basis():
+    # close of bar i -> close of bar i+N spans N bars; open of bar i+1 -> close
+    # of bar i+N must too, or the two horizons aren't comparable.
+    today = date.today()
+    n = 60
+    prices = [100.0 + i for i in range(n)]  # +1 per bar
+    frame = _ohlc(n, today, opens=prices, closes=prices)
+    from_date = today - timedelta(days=10)
+    with _seed(frame):
+        ret = market_data.get_forward_return_from_open("H.NS", from_date, trading_days=3)
+
+    b = _first_bar_after(frame, from_date)
+    # Held bars b, b+1, b+2 — three sessions, entering at b's open and leaving
+    # at b+2's close.
+    expected = (frame["Close"].iloc[b + 2] / frame["Open"].iloc[b] - 1) * 100
+    assert ret is not None and round(ret, 6) == round(expected, 6)
+
+
+def test_open_basis_fails_closed_when_the_window_predates_the_news():
+    today = date.today()
+    frame = _ohlc(20, today, opens=[100.0] * 20, closes=[100.0] * 20)
+    with _seed(frame):
+        assert market_data.get_forward_return_from_open(
+            "I.NS", today - timedelta(days=90), trading_days=3) is None
+
+
+def test_open_basis_returns_none_when_the_horizon_has_not_matured():
+    today = date.today()
+    frame = _ohlc(60, today, opens=[100.0] * 60, closes=[100.0] * 60)
+    with _seed(frame):
+        assert market_data.get_forward_return_from_open(
+            "J.NS", today, trading_days=3) is None
+
+
+def test_open_basis_returns_none_rather_than_nan_when_the_open_is_missing():
+    # yfinance leaves a NaN open on a bar that hasn't populated. NaN is a valid
+    # float, so an unguarded divide would propagate it into a stored return.
+    today = date.today()
+    n = 60
+    from_date = today - timedelta(days=6)
+    frame = _ohlc(n, today, opens=[100.0] * n, closes=[100.0] * n)
+    frame.iloc[_first_bar_after(frame, from_date), frame.columns.get_loc("Open")] = float("nan")
+    with _seed(frame):
+        ret = market_data.get_forward_return_from_open("K.NS", from_date, trading_days=1)
+    assert ret is None
+
+
+def test_close_only_source_still_yields_closes_and_no_opens():
+    # A frame without an Open column must not cost us the closes too.
+    today = date.today()
+    idx = pd.date_range(end=pd.Timestamp(today), periods=60, freq="D")
+    frame = pd.DataFrame({"Close": [100.0] * 60}, index=idx)
+    with _seed(frame):
+        assert get_forward_return("L.NS", today - timedelta(days=10), trading_days=1) == 0.0
+        assert market_data.get_forward_return_from_open(
+            "L.NS", today - timedelta(days=10), trading_days=1) is None

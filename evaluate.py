@@ -83,9 +83,10 @@ def _fmt_rate_ci(hits: int, n: int) -> str:
 def _rows(session, horizon):
     ret_col = getattr(Article, horizon)
     idx_col = getattr(Article, f"idx_{horizon}")
+    # entry_basis goes LAST so existing positional unpacking stays valid.
     stmt = select(
         Article.event_type, Article.impact_tier, Article.direction,
-        Article.confidence, ret_col, idx_col,
+        Article.confidence, ret_col, idx_col, Article.entry_basis,
     ).where(
         Article.alert_sent == True,  # noqa: E712
         Article.suppressed_reason.is_(None),  # never delivered => never an alert
@@ -147,7 +148,7 @@ def _summarize(label, rows):
     if not rows:
         return
     groups: dict[str, list] = {}
-    for et, tier, direction, conf, ret, idx_ret in rows:
+    for et, tier, direction, conf, ret, idx_ret, _basis in rows:
         groups.setdefault(label(et, tier), []).append((direction, ret, idx_ret))
     print(f"\n{'bucket':<22} {'n':>4} {'hit-rate [95% CI]':<20} {'avg move':>9} {'avg alpha':>10} {'impact%':>8}")
     print("-" * 80)
@@ -160,6 +161,48 @@ def _summarize(label, rows):
         alphas = [a for _, r, idx in items if (a := alpha_of(r, idx)) is not None]
         alpha_str = f"{sum(alphas) / len(alphas):+.2f}%" if alphas else "n/a"
         print(f"{key:<22} {n:>4} {_fmt_rate_ci(hits, n):<20} {avg:>+8.2f}% {alpha_str:>10} {impact_rate:>7.0%}")
+
+
+_LEGACY_BASIS_NOTE = (
+    "  NOTE: 'legacy' rows were measured before entry_basis existed (2026-09-17),\n"
+    "  always from the close on/after publication. For the ~22% of alerts filed\n"
+    "  after 15:30 IST that base pre-dates the news, so their return contains an\n"
+    "  overnight gap no order could have caught. Treat them as an upper bound;\n"
+    "  they age out of the 20-day tracking window on their own."
+)
+
+
+def _entry_basis_report(rows) -> None:
+    """Hit-rate split by the entry price the return was measured from.
+
+    This is the difference between a track record and a backtest artefact. An
+    after-hours filing measured from that day's close is measured from a price
+    that printed BEFORE the news existed, so the gap reaction counts as alpha
+    even though nobody could have traded it. Measured 2026-09-17 on 271
+    delivered alerts: the contaminated bucket showed +1.75% avg 1d alpha against
+    +0.26% for rows with a genuinely tradable base. If the edge only ever shows
+    up in 'legacy' below, there is no edge.
+    """
+    groups: dict[str, list] = {}
+    for _et, _tier, direction, _conf, ret, idx_ret, basis in rows:
+        groups.setdefault(basis or "legacy", []).append((direction, ret, idx_ret))
+
+    print(f"\n{'entry basis':<14} {'n':>4} {'alpha hit-rate [95% CI]':<24} {'avg alpha':>10}  tradable?")
+    print("-" * 74)
+    tradable = {"close": "yes", "next_open": "yes", "next_close": "yes (conservative)"}
+    for key in sorted(groups):
+        items = groups[key]
+        alphas = [(d, a) for d, r, idx in items if (a := alpha_of(r, idx)) is not None]
+        if not alphas:
+            print(f"{key:<14} {len(items):>4} {'no index leg yet':<24} {'n/a':>10}  {tradable.get(key, 'UNKNOWN')}")
+            continue
+        hits = sum(1 for d, a in alphas if _hit(d, a))
+        avg = sum(a for _, a in alphas) / len(alphas)
+        flag = tradable.get(key, "NO - contains gaps")
+        print(f"{key:<14} {len(alphas):>4} {_fmt_rate_ci(hits, len(alphas)):<24} {avg:>+9.2f}%  {flag}")
+
+    if "legacy" in groups:
+        print(_LEGACY_BASIS_NOTE)
 
 
 def main():
@@ -189,15 +232,15 @@ def main():
         print("\nNo matured alert outcomes yet. Let it run and re-check in a few days.")
         return
 
-    overall_hits = sum(1 for _, _, d, _, r, _ in rows if _hit(d, r))
-    avg_abs_move, impact_rate = impact_stats([r for *_, r, _ in rows])
+    overall_hits = sum(1 for _, _, d, _, r, _, _ in rows if _hit(d, r))
+    avg_abs_move, impact_rate = impact_stats([r for _, _, _, _, r, _, _ in rows])
     print(f"\nOverall raw hit-rate: {_fmt_rate_ci(overall_hits, len(rows))}")
     print(f"Overall avg |move|: {avg_abs_move:.2f}%  |  impactful (>= {IMPACT_MOVE_THRESHOLD_PCT:.0f}% move): {impact_rate:.0%}")
 
     # Alpha (market-adjusted): only over rows where the index leg has been
     # recorded. If none have it yet (index fetch is independent and can lag),
     # say so plainly rather than printing a misleading 0/0.
-    alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx in rows if idx is not None]
+    alpha_rows = [(d, alpha_of(r, idx)) for _, _, d, _, r, idx, _ in rows if idx is not None]
     if alpha_rows:
         alpha_hits = sum(1 for d, a in alpha_rows if _hit(d, a))
         avg_alpha = sum(a for _, a in alpha_rows) / len(alpha_rows)
@@ -209,12 +252,13 @@ def main():
     else:
         print("Alpha hit-rate: n/a — no rows have a recorded NIFTY 50 leg yet")
 
+    _entry_basis_report(rows)
     _summarize(lambda et, tier: et, rows)
     _summarize(lambda et, tier: f"tier:{tier}", rows)
 
     print("\nPrecision at confidence cutoffs:")
     for cut in (0.55, 0.65, 0.70, 0.80):
-        sel = [(d, r) for _, _, d, c, r, _ in rows if c >= cut]
+        sel = [(d, r) for _, _, d, c, r, _, _ in rows if c >= cut]
         if sel:
             hits = sum(1 for d, r in sel if _hit(d, r))
             print(f"  conf >= {cut:.2f}: n={len(sel):>4}  hit-rate={_fmt_rate_ci(hits, len(sel))}")

@@ -17,9 +17,15 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from src.scoring.outcomes import track_outcomes
+from src.scoring.outcomes import entry_basis_for, track_outcomes
 from src.storage.db import save_article, mark_alert_sent
 from src.storage.models import Base
+
+# NSE closes 15:30 IST = 10:00 UTC. These two hours put a filing unambiguously
+# inside / after the session, so the entry basis a test exercises is fixed
+# rather than depending on what time of day the suite happens to run.
+_INTRADAY_UTC_HOUR = 6   # 11:30 IST — session open, basis "close"
+_AFTER_CLOSE_UTC_HOUR = 14  # 19:30 IST — basis "next_open"
 
 
 @pytest.fixture
@@ -31,8 +37,16 @@ def session():
     s.close()
 
 
-def _add(session, ticker, published_days_ago=6):
-    published_at = datetime.now(timezone.utc) - timedelta(days=published_days_ago)
+def _add(session, ticker, published_days_ago=6, utc_hour=_INTRADAY_UTC_HOUR):
+    published_at = (datetime.now(timezone.utc) - timedelta(days=published_days_ago)).replace(
+        hour=utc_hour, minute=0, second=0, microsecond=0
+    )
+    if utc_hour == _AFTER_CLOSE_UTC_HOUR:
+        # An after-close filing is only "next_open" on a trading day — on a
+        # weekend the next close is Monday's and already post-news. Step back to
+        # a weekday so the intended basis is the one under test.
+        while published_at.weekday() >= 5:
+            published_at -= timedelta(days=1)
     a = save_article(
         session, ticker=ticker, headline=f"{ticker} headline", url=f"u-{ticker}",
         source="nse_announcements", published_at=published_at, category="Acquisition",
@@ -142,3 +156,109 @@ def test_aged_past_tracking_window_is_not_retried(session):
 
     mock_fr.assert_not_called()
     assert recorded == 0
+
+
+# ── entry basis: can a trader actually get the price we measured from? ───────
+#
+# A filing released after 15:30 IST is followed by a close that printed BEFORE
+# the news existed. Measuring from it books the overnight gap as alpha even
+# though no order could have been filled at that base. Measured on 271
+# delivered alerts: the after-hours bucket showed +1.75% avg 1d alpha on a close
+# base against +0.26% for genuinely tradable rows.
+
+def test_intraday_filing_measures_from_that_days_close():
+    dt = datetime(2026, 9, 16, 6, 0, tzinfo=timezone.utc)  # Wed 11:30 IST
+    assert entry_basis_for(dt) == "close"
+
+
+def test_after_close_filing_measures_from_the_next_open():
+    dt = datetime(2026, 9, 16, 14, 0, tzinfo=timezone.utc)  # Wed 19:30 IST
+    assert entry_basis_for(dt) == "next_open"
+
+
+def test_filing_exactly_at_the_bell_still_counts_as_intraday():
+    dt = datetime(2026, 9, 16, 10, 0, tzinfo=timezone.utc)  # Wed 15:30 IST sharp
+    assert entry_basis_for(dt) == "close"
+
+
+def test_weekend_filing_is_close_basis_because_mondays_close_is_post_news():
+    dt = datetime(2026, 9, 19, 14, 0, tzinfo=timezone.utc)  # Saturday
+    assert entry_basis_for(dt) == "close"
+
+
+def test_naive_published_at_is_treated_as_utc_not_local():
+    # SQLite hands back naive datetimes. Guessing local time here would flip the
+    # basis on any machine not running in UTC.
+    assert entry_basis_for(datetime(2026, 9, 16, 14, 0)) == "next_open"
+
+
+def test_after_close_alert_uses_the_open_fetcher_and_records_the_basis(session):
+    a = _add(session, "RITES.NS", utc_hour=_AFTER_CLOSE_UTC_HOUR)
+
+    def from_open(ticker, published_at, tdays):
+        return 1.0 if ticker == "^NSEI" else 2.5
+
+    with patch("src.scoring.outcomes.get_forward_return_from_open", side_effect=from_open), \
+         patch("src.scoring.outcomes.get_forward_return") as close_fetch:
+        track_outcomes(session, limit=60)
+
+    session.refresh(a)
+    assert a.ret_1d == 2.5
+    assert a.idx_ret_1d == 1.0           # index on the SAME basis, not the close
+    assert a.entry_basis == "next_open"
+    close_fetch.assert_not_called()      # the contaminated base was never touched
+
+
+def test_intraday_alert_records_close_basis(session):
+    a = _add(session, "RITES.NS")
+
+    with patch("src.scoring.outcomes.get_forward_return", side_effect=lambda t, p, d: 1.0):
+        track_outcomes(session, limit=60)
+
+    session.refresh(a)
+    assert a.entry_basis == "close"
+
+
+def test_bhavcopy_downgrades_next_open_to_next_close_and_index_follows(session):
+    # BSE bhavcopy stores EOD closes only. Entering at the next session's close
+    # is still post-news, so it stays honest — but the index leg has to move to
+    # the same window or alpha subtracts two different exposures.
+    a = _add(session, "532933.BO", utc_hour=_AFTER_CLOSE_UTC_HOUR)
+    calls = []
+
+    def close_fetch(ticker, from_dt, tdays):
+        calls.append((ticker, from_dt))
+        return 1.0
+
+    with patch("src.scoring.outcomes.get_forward_return_from_open", return_value=None), \
+         patch("src.scoring.outcomes.bse_bhavcopy.get_forward_return", return_value=2.5), \
+         patch("src.scoring.outcomes.get_forward_return", side_effect=close_fetch):
+        track_outcomes(session, limit=60)
+
+    session.refresh(a)
+    assert a.ret_1d == 2.5
+    assert a.entry_basis == "next_close"
+    # Every leg — index and the later horizons' stock legs — starts from the day
+    # AFTER publication. A single call left on the publication date would be the
+    # pre-news close this basis exists to avoid.
+    next_day = a.published_at.date() + timedelta(days=1)
+    assert calls
+    assert all(d == next_day for _, d in calls)
+    assert "^NSEI" in [t for t, _ in calls]
+
+
+def test_stored_basis_wins_over_a_freshly_derived_one_on_the_backfill_pass(session):
+    # The stock leg resolved to next_close on an earlier run. The later index-only
+    # pass must reuse that, not re-derive "next_open" and fetch a mismatched window.
+    a = _add(session, "532933.BO", published_days_ago=1, utc_hour=_AFTER_CLOSE_UTC_HOUR)
+    a.ret_1d = 2.5
+    a.entry_basis = "next_close"
+    session.commit()
+
+    with patch("src.scoring.outcomes.get_forward_return_from_open") as open_fetch, \
+         patch("src.scoring.outcomes.get_forward_return", side_effect=lambda t, p, d: 1.0):
+        track_outcomes(session, limit=60)
+
+    session.refresh(a)
+    assert a.idx_ret_1d == 1.0
+    open_fetch.assert_not_called()

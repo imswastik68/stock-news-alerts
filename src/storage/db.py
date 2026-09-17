@@ -59,6 +59,7 @@ def _ensure_schema(engine) -> None:
         "idx_ret_3d": "ALTER TABLE articles ADD COLUMN idx_ret_3d FLOAT",
         "idx_ret_5d": "ALTER TABLE articles ADD COLUMN idx_ret_5d FLOAT",
         "suppressed_reason": "ALTER TABLE articles ADD COLUMN suppressed_reason VARCHAR",
+        "entry_basis": "ALTER TABLE articles ADD COLUMN entry_basis VARCHAR",
     }
     with engine.begin() as conn:
         for column, ddl in additions.items():
